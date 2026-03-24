@@ -7,13 +7,100 @@ const THEME_KEY = "book_shelf_theme";
 const LAST_EXPORT_AT_KEY = "book_shelf_last_export_at";
 const EXPORT_REMINDER_DISMISSED_AT_KEY = "book_shelf_export_reminder_dismissed_at";
 const EXPORT_REMINDER_INTERVAL_MS = 14 * 24 * 60 * 60 * 1000;
+const SUPABASE_URL_KEY = "book_shelf_supabase_url";
+const SUPABASE_ANON_KEY_KEY = "book_shelf_supabase_anon_key";
+const SUPABASE_MIGRATED_PREFIX = "book_shelf_supabase_migrated_";
+const DEFAULT_SUPABASE_URL = "https://butvceqsbfdtwgihqcst.supabase.co";
 
-const SHELVES = [
+const DEFAULT_USER_SHELF_NAME = "My Bookshelf";
+const MAX_CUSTOM_USER_SHELVES = 25;
+
+/** Reading progress (not physical shelf). */
+const READING_STATUSES = [
   { id: "wishlist", label: "To read" },
   { id: "in_progress", label: "In progress" },
   { id: "read", label: "Read" },
   { id: "dnf", label: "Did not finish" },
 ];
+
+function readingStatusOf(book) {
+  let s = book?.readingStatus ?? book?.reading_status ?? book?.shelf;
+  if (s === "owned") s = "wishlist";
+  if (!["wishlist", "in_progress", "read", "dnf"].includes(s)) return "wishlist";
+  return s;
+}
+
+function readingStatusLabel(id) {
+  return READING_STATUSES.find((x) => x.id === id)?.label || id;
+}
+
+function ensureDefaultUserShelf(state) {
+  if (!Array.isArray(state.userShelves)) state.userShelves = [];
+  let def = state.userShelves.find((s) => s.isDefault);
+  if (!def) {
+    if (state.userShelves.length === 0) {
+      const now = new Date().toISOString();
+      state.userShelves.push({
+        id: uuid(),
+        name: DEFAULT_USER_SHELF_NAME,
+        isDefault: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+    } else {
+      state.userShelves[0].isDefault = true;
+      if (!String(state.userShelves[0].name || "").trim()) {
+        state.userShelves[0].name = DEFAULT_USER_SHELF_NAME;
+      }
+    }
+  }
+  const defaults = state.userShelves.filter((s) => s.isDefault);
+  if (defaults.length > 1) {
+    defaults.slice(1).forEach((s) => {
+      const row = state.userShelves.find((x) => x.id === s.id);
+      if (row) row.isDefault = false;
+    });
+  }
+}
+
+function getDefaultShelfId(state) {
+  return state.userShelves.find((s) => s.isDefault)?.id || state.userShelves[0]?.id;
+}
+
+function assignBookUserShelfIds(state) {
+  const defaultId = getDefaultShelfId(state);
+  if (!defaultId) return;
+  for (const b of state.books) {
+    if (!b.userShelfId || !state.userShelves.some((s) => s.id === b.userShelfId)) {
+      b.userShelfId = defaultId;
+    }
+  }
+}
+
+function finalizeUserShelvesAndBooks(state) {
+  ensureDefaultUserShelf(state);
+  state.books = state.books.map((b) => normalizeBook(b));
+  assignBookUserShelfIds(state);
+}
+
+function sortedUserShelves(state) {
+  const list = [...(state.userShelves || [])];
+  list.sort((a, b) => {
+    if (a.isDefault && !b.isDefault) return -1;
+    if (!a.isDefault && b.isDefault) return 1;
+    return (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" });
+  });
+  return list;
+}
+
+function countCustomUserShelves(state) {
+  return (state.userShelves || []).filter((s) => !s.isDefault).length;
+}
+
+function userShelfName(state, shelfId) {
+  const s = state.userShelves.find((x) => x.id === shelfId);
+  return s?.name || "Shelf";
+}
 
 const SORT_OPTIONS = [
   { id: "title_asc", label: "Title (A–Z)" },
@@ -26,6 +113,22 @@ const SORT_OPTIONS = [
 function uuid() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
   return "id-" + Date.now() + "-" + Math.random().toString(36).slice(2, 9);
+}
+
+function isUuidString(value) {
+  const s = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+  if (!s || s === "null" || s === "undefined") return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
+/** Valid v4 UUID for Postgres `uuid` columns (avoids `id-…` fallback ids from `uuid()`). */
+function newUuidV4() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
 function normalizeSeriesName(name) {
@@ -70,18 +173,37 @@ function normalizeGoalsFromStorage(rawGoals) {
 
 function normalizeBook(b) {
   if (!b || typeof b !== "object") return b;
-  let shelf = b.shelf;
-  if (shelf === "owned") shelf = "wishlist";
+  let readingStatus = b.readingStatus ?? b.reading_status;
+  const legacyShelf = b.shelf;
+  if (!readingStatus && legacyShelf) {
+    readingStatus = legacyShelf === "owned" ? "wishlist" : legacyShelf;
+  }
+  if (!["wishlist", "in_progress", "read", "dnf"].includes(readingStatus)) {
+    readingStatus = "wishlist";
+  }
+  const userShelfId = b.userShelfId ?? b.user_shelf_id ?? null;
   let rating = b.rating ?? null;
-  // Migrate legacy emoji ratings into the current text scale.
   if (rating === "frown") rating = "not_good";
   else if (rating === "meh") rating = "okay";
   else if (rating === "smile") rating = b.favorite ? "great" : "good";
   return {
-    ...b,
-    shelf,
-    rating,
+    id: b.id,
+    title: b.title,
+    author: b.author,
+    type: b.type || "physical",
+    tags: Array.isArray(b.tags) ? b.tags : [],
+    recommendedBy: b.recommendedBy ?? b.recommended_by ?? "",
+    userShelfId,
+    readingStatus,
     ownership: b.ownership === "borrowed" ? "borrowed" : "owned",
+    seriesId: b.seriesId ?? b.series_id ?? null,
+    volumeInSeries: b.volumeInSeries ?? b.volume_in_series ?? null,
+    rating,
+    favorite: !!b.favorite,
+    readAt: b.readAt ?? b.read_at ?? null,
+    readDateUnknown: !!(b.readDateUnknown || b.read_date_unknown),
+    createdAt: b.createdAt ?? b.created_at ?? new Date().toISOString(),
+    updatedAt: b.updatedAt ?? b.updated_at ?? new Date().toISOString(),
   };
 }
 
@@ -116,18 +238,32 @@ function loadState() {
       const hiddenSeriesIds = Array.isArray(data.hiddenSeriesIds)
         ? [...new Set(data.hiddenSeriesIds.map((x) => String(x).trim()).filter(Boolean))]
         : [];
-      return {
-        books: Array.isArray(data.books) ? data.books.map(normalizeBook) : [],
+      const out = {
+        books: Array.isArray(data.books) ? data.books : [],
         series: Array.isArray(data.series) ? data.series : [],
+        userShelves: Array.isArray(data.userShelves) ? data.userShelves : [],
         goals: normalizeGoalsFromStorage(data.goals),
         goalsHistory: gh,
         hiddenTagSuggestions: hiddenTags,
         wantList,
         hiddenSeriesIds,
       };
+      finalizeUserShelvesAndBooks(out);
+      return out;
     }
   } catch (_) {}
-  return { books: [], series: [], goals: [], goalsHistory: [], hiddenTagSuggestions: [], wantList: [], hiddenSeriesIds: [] };
+  const empty = {
+    books: [],
+    series: [],
+    userShelves: [],
+    goals: [],
+    goalsHistory: [],
+    hiddenTagSuggestions: [],
+    wantList: [],
+    hiddenSeriesIds: [],
+  };
+  finalizeUserShelvesAndBooks(empty);
+  return empty;
 }
 
 function loadStateFromObject(data) {
@@ -143,15 +279,18 @@ function loadStateFromObject(data) {
   const hiddenSeriesIds = Array.isArray(data?.hiddenSeriesIds)
     ? [...new Set(data.hiddenSeriesIds.map((x) => String(x).trim()).filter(Boolean))]
     : [];
-  return {
-    books: Array.isArray(data?.books) ? data.books.map(normalizeBook) : [],
+  const out = {
+    books: Array.isArray(data?.books) ? data.books : [],
     series: Array.isArray(data?.series) ? data.series : [],
+    userShelves: Array.isArray(data?.userShelves) ? data.userShelves : [],
     goals: normalizeGoalsFromStorage(data?.goals),
     goalsHistory: gh,
     hiddenTagSuggestions: hiddenTags,
     wantList,
     hiddenSeriesIds,
   };
+  finalizeUserShelvesAndBooks(out);
+  return out;
 }
 
 function saveState(state) {
@@ -160,6 +299,7 @@ function saveState(state) {
     JSON.stringify({
       books: state.books,
       series: state.series,
+      userShelves: state.userShelves || [],
       goals: state.goals,
       goalsHistory: state.goalsHistory || [],
       hiddenTagSuggestions: state.hiddenTagSuggestions || [],
@@ -203,7 +343,7 @@ function readDateInPeriod(readAt, period) {
 
 function countReadBooksInPeriod(books, period, excludeAudiobooks) {
   return books.filter((b) => {
-    if (b.shelf !== "read" || !readDateInPeriod(b.readAt, period)) return false;
+    if (readingStatusOf(b) !== "read" || !readDateInPeriod(b.readAt, period)) return false;
     if (excludeAudiobooks && b.type === "audiobook") return false;
     return true;
   }).length;
@@ -271,7 +411,7 @@ function countReadBooksInPeriodWindow(books, period, periodKey, excludeAudiobook
   const { start, end } = getPeriodWindow(period, periodKey);
   if (Number.isNaN(start.getTime())) return 0;
   return books.filter((b) => {
-    if (b.shelf !== "read") return false;
+    if (readingStatusOf(b) !== "read") return false;
     if (!readAtInWindow(b.readAt, start, end)) return false;
     if (excludeAudiobooks && b.type === "audiobook") return false;
     return true;
@@ -428,7 +568,7 @@ function booksInSeries(state, seriesId) {
 function seriesProgress(state, seriesId) {
   const meta = state.series.find((s) => s.id === seriesId);
   const volumes = booksInSeries(state, seriesId);
-  const readCount = volumes.filter((b) => b.shelf === "read").length;
+  const readCount = volumes.filter((b) => readingStatusOf(b) === "read").length;
   const nums = volumes.map((b) => b.volumeInSeries).filter((n) => typeof n === "number" && n > 0);
   const maxVol = nums.length ? Math.max(...nums) : 0;
   let total = meta?.expectedTotal;
@@ -473,9 +613,10 @@ function sortBooks(list, sortId) {
   return out;
 }
 
-function filterBooks(books, { shelfTab, q, type, favoritesOnly, ownership }) {
+function filterBooks(books, { userShelfId, readingStatusFilter, q, type, favoritesOnly, ownership }) {
   let list = books;
-  if (shelfTab !== "all") list = list.filter((b) => b.shelf === shelfTab);
+  if (userShelfId) list = list.filter((b) => b.userShelfId === userShelfId);
+  if (readingStatusFilter) list = list.filter((b) => readingStatusOf(b) === readingStatusFilter);
   if (type) list = list.filter((b) => b.type === type);
   if (ownership === "owned") list = list.filter((b) => b.ownership !== "borrowed");
   if (ownership === "borrowed") list = list.filter((b) => b.ownership === "borrowed");
@@ -500,10 +641,6 @@ function typeLabel(t) {
   return "Physical";
 }
 
-function shelfLabel(id) {
-  return SHELVES.find((s) => s.id === id)?.label || id;
-}
-
 function amazonSearchUrl(title, author, mode) {
   const t = String(title || "").trim();
   const a = String(author || "").trim();
@@ -514,7 +651,11 @@ function amazonSearchUrl(title, author, mode) {
 
 // --- DOM ---
 const els = {
-  shelfTabs: document.querySelector(".shelf-tabs"),
+  shelfList: document.getElementById("shelf-list"),
+  shelfActiveHeading: document.getElementById("shelf-active-heading"),
+  newShelfName: document.getElementById("new-shelf-name"),
+  btnAddUserShelf: document.getElementById("btn-add-user-shelf"),
+  filterReadingStatus: document.getElementById("filter-reading-status"),
   bookList: document.getElementById("book-list"),
   listEmpty: document.getElementById("list-empty"),
   search: document.getElementById("search-books"),
@@ -523,6 +664,24 @@ const els = {
   filterOwnership: document.getElementById("filter-ownership"),
   filterFavorites: document.getElementById("filter-favorites"),
   btnAdd: document.getElementById("btn-add-book"),
+  authGate: document.getElementById("auth-gate"),
+  appShell: document.getElementById("app-shell"),
+  supabaseUrl: document.getElementById("supabase-url"),
+  supabaseAnonKey: document.getElementById("supabase-anon-key"),
+  btnSaveSupabaseConfig: document.getElementById("btn-save-supabase-config"),
+  profileSupabaseUrl: document.getElementById("profile-supabase-url"),
+  profileSupabaseAnonKey: document.getElementById("profile-supabase-anon-key"),
+  btnSaveSupabaseConfigProfile: document.getElementById("btn-save-supabase-config-profile"),
+  authEmail: document.getElementById("auth-email"),
+  authPassword: document.getElementById("auth-password"),
+  btnSignIn: document.getElementById("btn-sign-in"),
+  btnSignUp: document.getElementById("btn-sign-up"),
+  btnSignOut: document.getElementById("btn-sign-out"),
+  authStatus: document.getElementById("auth-status"),
+  profileEmail: document.getElementById("profile-email"),
+  profileAuthStatus: document.getElementById("profile-auth-status"),
+  btnProfileToggle: document.getElementById("btn-profile-toggle"),
+  profileMenu: document.getElementById("profile-menu"),
   btnSettingsToggle: document.getElementById("btn-settings-toggle"),
   settingsMenu: document.getElementById("settings-menu"),
   btnExportData: document.getElementById("btn-export-data"),
@@ -581,7 +740,8 @@ const els = {
   bookTitle: document.getElementById("book-title"),
   bookAuthor: document.getElementById("book-author"),
   bookType: document.getElementById("book-type"),
-  bookShelf: document.getElementById("book-shelf"),
+  bookUserShelf: document.getElementById("book-user-shelf"),
+  bookReadingStatus: document.getElementById("book-reading-status"),
   bookOwnership: document.getElementById("book-ownership"),
   bookFinishedWrap: document.getElementById("book-finished-wrap"),
   bookFinishedDate: document.getElementById("book-finished-date"),
@@ -605,9 +765,6 @@ const els = {
   btnRateSave: document.getElementById("btn-rate-save"),
   btnRateSkip: document.getElementById("btn-rate-skip"),
   btnScrollTop: document.getElementById("btn-scroll-top"),
-  linkWantList: document.getElementById("link-want-list"),
-  linkGoals: document.getElementById("link-goals"),
-  linkSeries: document.getElementById("link-series"),
 };
 
 let state = loadState();
@@ -615,16 +772,608 @@ if (!state.goalsHistory) state.goalsHistory = [];
 if (!state.hiddenTagSuggestions) state.hiddenTagSuggestions = [];
 if (!state.wantList) state.wantList = [];
 if (!state.hiddenSeriesIds) state.hiddenSeriesIds = [];
-let activeShelf = "all";
+if (!state.userShelves) state.userShelves = [];
+let activeUserShelfId = getDefaultShelfId(state) || null;
+/** Right column: library | want_list | series */
+let activeMainView = "library";
 let pendingRateBookId = null;
 let selectedRating = null;
 let tagSuggestBlurTimer = null;
 let wantTagSuggestBlurTimer = null;
 let pendingWantListAdoptId = null;
 let pendingSeriesHideId = null;
+const expandedBookIds = new Set();
+let sbClient = null;
+let sbSession = null;
+let sbUserId = null;
+let cloudSyncTimer = null;
+let isCloudLoading = false;
+let supabaseAuthListenerAttached = false;
+/** Set when cloud state has been loaded successfully for the current access token (avoids skipping retry after a failed load). */
+let cloudHydratedAccessToken = null;
 
 function persist() {
   saveState(state);
+  scheduleCloudSync();
+}
+
+function getSupabaseConfig() {
+  const url = (localStorage.getItem(SUPABASE_URL_KEY) || DEFAULT_SUPABASE_URL).trim();
+  const anonKey = (localStorage.getItem(SUPABASE_ANON_KEY_KEY) || "").trim();
+  return { url, anonKey };
+}
+
+function setAuthStatus(message, isError) {
+  const color = isError ? "var(--danger)" : "var(--text-muted)";
+  if (els.authStatus) {
+    els.authStatus.textContent = message;
+    els.authStatus.style.color = color;
+  }
+  if (els.profileAuthStatus) {
+    els.profileAuthStatus.textContent = message;
+    els.profileAuthStatus.style.color = color;
+  }
+}
+
+function syncSupabaseFormFields(url, anonKey) {
+  const u = url ?? "";
+  const a = anonKey ?? "";
+  if (els.supabaseUrl) els.supabaseUrl.value = u;
+  if (els.supabaseAnonKey) els.supabaseAnonKey.value = a;
+  if (els.profileSupabaseUrl) els.profileSupabaseUrl.value = u;
+  if (els.profileSupabaseAnonKey) els.profileSupabaseAnonKey.value = a;
+}
+
+function readSupabaseFormForSave() {
+  if (sbUserId && els.profileSupabaseUrl) {
+    return {
+      url: (els.profileSupabaseUrl.value || "").trim(),
+      anon: (els.profileSupabaseAnonKey.value || "").trim(),
+    };
+  }
+  return {
+    url: (els.supabaseUrl?.value || "").trim(),
+    anon: (els.supabaseAnonKey?.value || "").trim(),
+  };
+}
+
+function updateShellForAuth() {
+  const signedIn = !!sbUserId;
+  const skip = document.querySelector(".skip-link");
+  if (skip) skip.setAttribute("href", signedIn ? "#main" : "#auth-gate-inner");
+  if (els.authGate) els.authGate.classList.toggle("hidden", signedIn);
+  if (els.appShell) els.appShell.classList.toggle("hidden", !signedIn);
+  if (els.btnProfileToggle) els.btnProfileToggle.classList.toggle("hidden", !signedIn);
+  if (signedIn && els.profileEmail) {
+    els.profileEmail.textContent = sbSession?.user?.email || "";
+  }
+}
+
+function hasSupabaseSdk() {
+  return typeof window !== "undefined" && window.supabase && typeof window.supabase.createClient === "function";
+}
+
+function initSupabaseClient() {
+  const { url, anonKey } = getSupabaseConfig();
+  syncSupabaseFormFields(url, anonKey);
+  if (!hasSupabaseSdk()) {
+    setAuthStatus("Supabase SDK did not load.", true);
+    return null;
+  }
+  if (!url || !anonKey) {
+    return null;
+  }
+  try {
+    sbClient = window.supabase.createClient(url, anonKey);
+    supabaseAuthListenerAttached = false;
+    return sbClient;
+  } catch (_) {
+    setAuthStatus("Could not initialize Supabase client.", true);
+    return null;
+  }
+}
+
+/** If the connection fields on the auth gate are filled, persist them so the client can be created. */
+function persistAuthGateSupabaseToStorageIfFilled() {
+  const formUrl = (els.supabaseUrl?.value || "").trim();
+  const formAnon = (els.supabaseAnonKey?.value || "").trim();
+  if (formUrl && formAnon) {
+    localStorage.setItem(SUPABASE_URL_KEY, formUrl);
+    localStorage.setItem(SUPABASE_ANON_KEY_KEY, formAnon);
+    syncSupabaseFormFields(formUrl, formAnon);
+  }
+}
+
+function attachSupabaseAuthListenerIfNeeded() {
+  if (!sbClient || supabaseAuthListenerAttached) return;
+  supabaseAuthListenerAttached = true;
+  sbClient.auth.onAuthStateChange((_event, session) => {
+    void enqueueHandleSession(session);
+  });
+}
+
+/** Use stored config and/or values typed on the auth gate; attach auth listener. */
+function ensureSupabaseClientForAuth() {
+  if (!hasSupabaseSdk()) {
+    setAuthStatus("Supabase SDK did not load. Check your network.", true);
+    return false;
+  }
+  persistAuthGateSupabaseToStorageIfFilled();
+  if (!sbClient && !initSupabaseClient()) {
+    setAuthStatus("Enter your Supabase URL and anon key (both required), then try again.", true);
+    return false;
+  }
+  attachSupabaseAuthListenerIfNeeded();
+  return true;
+}
+
+function localStateHasContent(x) {
+  return (
+    (x.books?.length || 0) +
+    (x.series?.length || 0) +
+    (x.wantList?.length || 0) +
+    (x.goals?.length || 0) +
+    (x.goalsHistory?.length || 0)
+  ) > 0;
+}
+
+function mapStateToSupabasePayload(userId, s) {
+  const shelfRemap = new Map();
+  const rawShelves = [...(s.userShelves || [])];
+  const shelvesWithIds = rawShelves.map((row) => {
+    const rawId = row.id != null ? String(row.id).trim() : "";
+    if (isUuidString(rawId)) return { row, id: rawId };
+    const newId = newUuidV4();
+    const oldKey = row.id != null ? String(row.id).trim() : "";
+    if (oldKey) shelfRemap.set(oldKey, newId);
+    return { row, id: newId };
+  });
+
+  let defaultSeen = false;
+  const userShelves = shelvesWithIds.map(({ row, id }) => {
+    let isDef = !!row.isDefault;
+    if (isDef) {
+      if (defaultSeen) isDef = false;
+      else defaultSeen = true;
+    }
+    return {
+      id,
+      user_id: userId,
+      name: String(row.name || "").trim() || DEFAULT_USER_SHELF_NAME,
+      is_default: isDef,
+      created_at: row.createdAt || new Date().toISOString(),
+      updated_at: row.updatedAt || new Date().toISOString(),
+    };
+  });
+  if (userShelves.length && !userShelves.some((x) => x.is_default)) {
+    userShelves.forEach((sh, i) => {
+      sh.is_default = i === 0;
+    });
+  }
+
+  const userShelfIds = new Set(userShelves.map((x) => x.id));
+
+  const goalIds = new Set((s.goals || []).map((g) => g.id).filter(isUuidString));
+  const seriesIds = new Set((s.series || []).map((x) => x.id).filter(isUuidString));
+
+  const resolveShelfId = (raw) => {
+    if (raw == null) return null;
+    const ks = String(raw).trim();
+    if (!ks) return null;
+    return shelfRemap.has(ks) ? shelfRemap.get(ks) : ks;
+  };
+
+  const defaultShelfId = userShelves.find((x) => x.is_default)?.id ?? userShelves[0]?.id ?? null;
+
+  const books = (s.books || []).map((b) => {
+    let sid = resolveShelfId(b.userShelfId);
+    if (sid && !userShelfIds.has(sid)) sid = null;
+    const userShelfKey = sid || (defaultShelfId && userShelfIds.has(defaultShelfId) ? defaultShelfId : null);
+    return {
+      id: b.id,
+      user_id: userId,
+      title: b.title || "",
+      author: b.author || "",
+      type: b.type || "physical",
+      user_shelf_id: userShelfKey && userShelfIds.has(userShelfKey) ? userShelfKey : null,
+      reading_status: readingStatusOf(b),
+      ownership: b.ownership || "owned",
+      tags: b.tags || [],
+      recommended_by: b.recommendedBy || "",
+      series_id: b.seriesId && seriesIds.has(b.seriesId) ? b.seriesId : null,
+      volume_in_series: b.volumeInSeries ?? null,
+      rating: b.rating || null,
+      favorite: !!b.favorite,
+      read_at: b.readAt || null,
+      read_date_unknown: !!b.readDateUnknown,
+      created_at: b.createdAt || new Date().toISOString(),
+      updated_at: b.updatedAt || new Date().toISOString(),
+    };
+  });
+  const series = (s.series || []).map((x) => ({
+    id: x.id,
+    user_id: userId,
+    name: x.name || "",
+    expected_total: x.expectedTotal ?? null,
+    publishing_incomplete: !!x.publishingIncomplete,
+    hidden: (s.hiddenSeriesIds || []).includes(x.id),
+    created_at: x.createdAt || new Date().toISOString(),
+    updated_at: x.updatedAt || new Date().toISOString(),
+  }));
+  const wantList = (s.wantList || []).map((w) => ({
+    id: w.id,
+    user_id: userId,
+    title: w.title || "",
+    author: w.author || "",
+    notes: w.notes || "",
+    tags: w.tags || [],
+    recommended_by: w.recommendedBy || "",
+    created_at: w.createdAt || new Date().toISOString(),
+    updated_at: w.updatedAt || new Date().toISOString(),
+  }));
+  const goals = (s.goals || []).map((g) => ({
+    id: g.id,
+    user_id: userId,
+    period: g.period,
+    target: g.target,
+    exclude_audiobooks: !!g.excludeAudiobooks,
+    current_period_key: g.currentPeriodKey || null,
+    created_at: g.createdAt || new Date().toISOString(),
+    updated_at: g.updatedAt || new Date().toISOString(),
+  }));
+  const goalsHistory = (s.goalsHistory || []).map((h) => ({
+    id: h.id,
+    user_id: userId,
+    source_goal_id: h.sourceGoalId && goalIds.has(h.sourceGoalId) ? h.sourceGoalId : null,
+    period: h.period,
+    period_key: h.periodKey,
+    target: h.target,
+    exclude_audiobooks: !!h.excludeAudiobooks,
+    finished_count: h.finishedCount || 0,
+    archived_at: h.archivedAt || new Date().toISOString(),
+    reason: h.reason || "period_rollover",
+  }));
+  const userSettings = {
+    user_id: userId,
+    theme: localStorage.getItem(THEME_KEY) === "dark" ? "dark" : "light",
+    hidden_tag_suggestions: s.hiddenTagSuggestions || [],
+    hidden_series_ids: (s.hiddenSeriesIds || []).filter(isUuidString),
+    last_export_at: localStorage.getItem(LAST_EXPORT_AT_KEY) || null,
+    export_reminder_dismissed_at: localStorage.getItem(EXPORT_REMINDER_DISMISSED_AT_KEY) || null,
+  };
+  return { books, series, userShelves, wantList, goals, goalsHistory, userSettings };
+}
+
+function mapSupabaseRowsToState(rows) {
+  const out = {
+    books: [],
+    series: [],
+    userShelves: [],
+    goals: [],
+    goalsHistory: [],
+    hiddenTagSuggestions: [],
+    wantList: [],
+    hiddenSeriesIds: [],
+  };
+  out.userShelves = (rows.userShelves || []).map((r) => ({
+    id: r.id,
+    name: r.name || DEFAULT_USER_SHELF_NAME,
+    isDefault: !!r.is_default,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }));
+  out.books = (rows.books || []).map((b) =>
+    normalizeBook({
+      id: b.id,
+      title: b.title,
+      author: b.author,
+      type: b.type,
+      shelf: b.shelf,
+      reading_status: b.reading_status,
+      user_shelf_id: b.user_shelf_id,
+      ownership: b.ownership,
+      tags: b.tags || [],
+      recommendedBy: b.recommended_by || "",
+      seriesId: b.series_id,
+      volumeInSeries: b.volume_in_series,
+      rating: b.rating,
+      favorite: !!b.favorite,
+      readAt: b.read_at,
+      readDateUnknown: !!b.read_date_unknown,
+      createdAt: b.created_at,
+      updatedAt: b.updated_at,
+    })
+  );
+  out.series = (rows.series || []).map((s) => ({
+    id: s.id,
+    name: s.name,
+    expectedTotal: s.expected_total,
+    publishingIncomplete: !!s.publishing_incomplete,
+    createdAt: s.created_at,
+    updatedAt: s.updated_at,
+  }));
+  out.wantList = (rows.wantList || []).map((w) =>
+    normalizeWantItem({
+      id: w.id,
+      title: w.title,
+      author: w.author,
+      notes: w.notes,
+      tags: w.tags || [],
+      recommendedBy: w.recommended_by || "",
+      createdAt: w.created_at,
+      updatedAt: w.updated_at,
+    })
+  );
+  out.goals = (rows.goals || []).map((g) => ({
+    id: g.id,
+    period: g.period,
+    target: g.target,
+    excludeAudiobooks: !!g.exclude_audiobooks,
+    currentPeriodKey: g.current_period_key || null,
+    createdAt: g.created_at,
+    updatedAt: g.updated_at,
+  }));
+  out.goalsHistory = (rows.goalsHistory || []).map((h) => ({
+    id: h.id,
+    sourceGoalId: h.source_goal_id || null,
+    period: h.period,
+    periodKey: h.period_key,
+    target: h.target,
+    excludeAudiobooks: !!h.exclude_audiobooks,
+    finishedCount: h.finished_count || 0,
+    archivedAt: h.archived_at,
+    reason: h.reason || "period_rollover",
+  }));
+  const settings = rows.userSettings;
+  out.hiddenTagSuggestions = settings?.hidden_tag_suggestions || [];
+  out.hiddenSeriesIds = settings?.hidden_series_ids || [];
+  out.theme = settings?.theme || null;
+  finalizeUserShelvesAndBooks(out);
+  return out;
+}
+
+function isCloudStateEmpty(x) {
+  return !localStateHasContent(x);
+}
+
+/** Human-readable Supabase / network error for status line + console. */
+function describeLoadError(err) {
+  if (err == null) return "";
+  if (typeof err === "string") return err;
+  const code = err.code ? `${err.code}: ` : "";
+  const msg = err.message || String(err);
+  const details = err.details ? ` ${err.details}` : "";
+  const hint = err.hint ? ` — ${err.hint}` : "";
+  const s = `${code}${msg}${details}${hint}`.trim();
+  return s || "Unknown error.";
+}
+
+async function loadStateFromSupabase(userId) {
+  const uid = String(userId || "").trim();
+  if (!isUuidString(uid)) {
+    throw new Error("Invalid account id for cloud load. Sign out and sign in again.");
+  }
+  const [booksR, seriesR, shelvesR, wantR, goalsR, goalsHistR, settingsR] = await Promise.all([
+    sbClient.from("books").select("*").eq("user_id", uid),
+    sbClient.from("series").select("*").eq("user_id", uid),
+    sbClient.from("user_shelves").select("*").eq("user_id", uid),
+    sbClient.from("want_list").select("*").eq("user_id", uid),
+    sbClient.from("goals").select("*").eq("user_id", uid),
+    sbClient.from("goals_history").select("*").eq("user_id", uid),
+    sbClient.from("user_settings").select("*").eq("user_id", uid).limit(1),
+  ]);
+  const err =
+    booksR.error || seriesR.error || shelvesR.error || wantR.error || goalsR.error || goalsHistR.error || settingsR.error;
+  if (err) throw err;
+  const settingsRow = Array.isArray(settingsR.data) && settingsR.data.length ? settingsR.data[0] : null;
+  return mapSupabaseRowsToState({
+    books: booksR.data || [],
+    series: seriesR.data || [],
+    userShelves: shelvesR.data || [],
+    wantList: wantR.data || [],
+    goals: goalsR.data || [],
+    goalsHistory: goalsHistR.data || [],
+    userSettings: settingsRow,
+  });
+}
+
+async function ensureSupabaseSessionForWrite() {
+  if (!sbClient) throw new Error("Not connected to Supabase.");
+  const { data: sess, error } = await sbClient.auth.getSession();
+  if (!error && sess?.session?.access_token) return;
+  const { data: ref, error: refErr } = await sbClient.auth.refreshSession();
+  if (refErr || !ref?.session?.access_token) {
+    throw new Error("Session expired. Sign in again to sync.");
+  }
+}
+
+async function replaceTableByUser(table, userId, rows) {
+  const uid = String(userId || "").trim();
+  if (!isUuidString(uid)) throw new Error("Invalid user id for sync.");
+  const del = await sbClient.from(table).delete().eq("user_id", uid);
+  if (del.error) throw del.error;
+  if (!rows.length) return;
+  const ins = await sbClient.from(table).insert(rows);
+  if (ins.error) throw ins.error;
+}
+
+async function saveStateToSupabase(userId, snapshot) {
+  const uid = String(userId || "").trim();
+  if (!isUuidString(uid)) throw new Error("Invalid user id for sync.");
+  await ensureSupabaseSessionForWrite();
+  const payload = mapStateToSupabasePayload(uid, snapshot);
+  const delB = await sbClient.from("books").delete().eq("user_id", uid);
+  if (delB.error) throw delB.error;
+  const delSh = await sbClient.from("user_shelves").delete().eq("user_id", uid);
+  if (delSh.error) throw delSh.error;
+  const delS = await sbClient.from("series").delete().eq("user_id", uid);
+  if (delS.error) throw delS.error;
+  if (payload.userShelves.length) {
+    const insSh = await sbClient.from("user_shelves").insert(payload.userShelves);
+    if (insSh.error) throw insSh.error;
+  }
+  if (payload.series.length) {
+    const insS = await sbClient.from("series").insert(payload.series);
+    if (insS.error) throw insS.error;
+  }
+  if (payload.books.length) {
+    const insB = await sbClient.from("books").insert(payload.books);
+    if (insB.error) throw insB.error;
+  }
+  await replaceTableByUser("want_list", uid, payload.wantList);
+  await replaceTableByUser("goals", uid, payload.goals);
+  await replaceTableByUser("goals_history", uid, payload.goalsHistory);
+  const setRes = await sbClient.from("user_settings").upsert(payload.userSettings);
+  if (setRes.error) throw setRes.error;
+}
+
+function scheduleCloudSync() {
+  if (!sbClient || !sbUserId || isCloudLoading) return;
+  clearTimeout(cloudSyncTimer);
+  cloudSyncTimer = setTimeout(async () => {
+    try {
+      const snapshot = JSON.parse(JSON.stringify(state));
+      await saveStateToSupabase(sbUserId, snapshot);
+      setAuthStatus(`Signed in. Synced ${new Date().toLocaleTimeString()}.`, false);
+    } catch (err) {
+      console.error("Cloud sync failed:", err);
+      const detail = err?.message || err?.details || "";
+      setAuthStatus(detail ? `Cloud sync failed: ${detail}` : "Signed in, but cloud sync failed.", true);
+    }
+  }, 700);
+}
+
+function migrationKeyForUser(userId) {
+  return `${SUPABASE_MIGRATED_PREFIX}${userId}`;
+}
+
+/** Serialize auth handling so concurrent onAuthStateChange + signIn callbacks don’t clobber session state. */
+let handleSessionChain = Promise.resolve();
+function enqueueHandleSession(session) {
+  handleSessionChain = handleSessionChain
+    .then(() => runHandleSession(session))
+    .catch((err) => console.error("Auth session handler:", err));
+  return handleSessionChain;
+}
+
+async function runHandleSession(session) {
+  const incomingUid = session?.user?.id ?? null;
+  const incomingTok = session?.access_token ?? null;
+  if (incomingUid && incomingTok && sbUserId === incomingUid && cloudHydratedAccessToken != null) {
+    sbSession = session;
+    cloudHydratedAccessToken = incomingTok;
+    return;
+  }
+  sbSession = session || null;
+  sbUserId = incomingUid || null;
+  if (!sbUserId) {
+    cloudHydratedAccessToken = null;
+    state = loadState();
+    if (!state.goalsHistory) state.goalsHistory = [];
+    if (!state.hiddenTagSuggestions) state.hiddenTagSuggestions = [];
+    if (!state.wantList) state.wantList = [];
+    if (!state.hiddenSeriesIds) state.hiddenSeriesIds = [];
+    const { url, anonKey } = getSupabaseConfig();
+    if (!hasSupabaseSdk()) {
+      setAuthStatus("Supabase SDK did not load. Check your network.", true);
+    } else if (!url || !anonKey) {
+      setAuthStatus("Enter your Supabase URL and anon key, then save connection.", false);
+    } else {
+      setAuthStatus("Sign in or create an account to continue.", false);
+    }
+    activeUserShelfId = getDefaultShelfId(state) || null;
+    renderAll();
+    updateShellForAuth();
+    toggleProfileMenu(false);
+    toggleSettingsMenu(false);
+    return;
+  }
+  try {
+    isCloudLoading = true;
+    setAuthStatus("Loading your library…", false);
+    if (session) sbSession = session;
+
+    let authUserData;
+    let userErr;
+    ({ data: authUserData, error: userErr } = await sbClient.auth.getUser());
+    if (userErr) {
+      const em = String(userErr.message || userErr.code || "").toLowerCase();
+      if (
+        em.includes("session") ||
+        em.includes("jwt") ||
+        userErr.name === "AuthSessionMissingError" ||
+        userErr.status === 403
+      ) {
+        const { data: ref, error: refErr } = await sbClient.auth.refreshSession();
+        if (!refErr && ref?.session) {
+          sbSession = ref.session;
+          ({ data: authUserData, error: userErr } = await sbClient.auth.getUser());
+        }
+      }
+    }
+    if (userErr) throw userErr;
+    const rawUserId = authUserData?.user?.id;
+    const cloudUserId = rawUserId != null ? String(rawUserId).trim() : "";
+    if (!isUuidString(cloudUserId)) {
+      throw new Error("Could not read your account id after sign-in. Sign out and try again.");
+    }
+    sbUserId = cloudUserId;
+
+    const localSnapshot = JSON.parse(JSON.stringify(state));
+    const cloudState = await loadStateFromSupabase(cloudUserId);
+    const migratedKey = migrationKeyForUser(cloudUserId);
+    const hasMigrated = localStorage.getItem(migratedKey) === "1";
+    if (!hasMigrated && isCloudStateEmpty(cloudState) && localStateHasContent(localSnapshot)) {
+      const ok = confirm("Import your current local data to this account now?");
+      if (ok) {
+        await saveStateToSupabase(cloudUserId, localSnapshot);
+        localStorage.setItem(migratedKey, "1");
+        state = localSnapshot;
+      } else {
+        localStorage.setItem(migratedKey, "1");
+        state = cloudState;
+      }
+    } else {
+      state = cloudState;
+    }
+    if (!state.goalsHistory) state.goalsHistory = [];
+    if (!state.hiddenTagSuggestions) state.hiddenTagSuggestions = [];
+    if (!state.wantList) state.wantList = [];
+    if (!state.hiddenSeriesIds) state.hiddenSeriesIds = [];
+    if (!state.userShelves) state.userShelves = [];
+    finalizeUserShelvesAndBooks(state);
+    activeUserShelfId = getDefaultShelfId(state) || null;
+    if (state.theme) applyTheme(state.theme);
+    renderAll();
+    setAuthStatus(`Signed in as ${sbSession.user.email || "user"}.`, false);
+    cloudHydratedAccessToken = sbSession?.access_token ?? null;
+  } catch (err) {
+    console.error("Cloud load failed:", err);
+    const detail = describeLoadError(err);
+    setAuthStatus(
+      detail
+        ? `Couldn’t load cloud data: ${detail}`
+        : "Signed in, but failed loading cloud data. Check the browser console and your Supabase project (tables + RLS).",
+      true
+    );
+    renderAll();
+  } finally {
+    isCloudLoading = false;
+    updateShellForAuth();
+  }
+}
+
+async function initSupabaseAuth() {
+  initSupabaseClient();
+  if (!sbClient) {
+    await enqueueHandleSession(null);
+    return;
+  }
+  attachSupabaseAuthListenerIfNeeded();
+  const { data: bootSess } = await sbClient.auth.getSession();
+  if (bootSess?.session?.user) {
+    void enqueueHandleSession(bootSess.session);
+  }
 }
 
 function updateScrollTopVisibility() {
@@ -665,10 +1414,12 @@ function makeExportPayload() {
     data: {
       books: state.books || [],
       series: state.series || [],
+      userShelves: state.userShelves || [],
       goals: state.goals || [],
       goalsHistory: state.goalsHistory || [],
       hiddenTagSuggestions: state.hiddenTagSuggestions || [],
       wantList: state.wantList || [],
+      hiddenSeriesIds: state.hiddenSeriesIds || [],
     },
   };
 }
@@ -717,8 +1468,18 @@ function toggleSettingsMenu(force) {
   if (!els.settingsMenu || !els.btnSettingsToggle) return;
   const shouldOpen =
     typeof force === "boolean" ? force : els.settingsMenu.classList.contains("hidden");
+  if (shouldOpen) toggleProfileMenu(false);
   els.settingsMenu.classList.toggle("hidden", !shouldOpen);
   els.btnSettingsToggle.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+}
+
+function toggleProfileMenu(force) {
+  if (!els.profileMenu || !els.btnProfileToggle) return;
+  const shouldOpen =
+    typeof force === "boolean" ? force : els.profileMenu.classList.contains("hidden");
+  if (shouldOpen) toggleSettingsMenu(false);
+  els.profileMenu.classList.toggle("hidden", !shouldOpen);
+  els.btnProfileToggle.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
 }
 
 function hideTagSuggestionsPanel() {
@@ -854,37 +1615,190 @@ function maybeAutofillSeriesTotal() {
   }
 }
 
-function initShelfSelects() {
-  els.bookShelf.innerHTML = SHELVES.map(
-    (s) => `<option value="${s.id}">${s.label}</option>`
-  ).join("");
-
-  els.shelfTabs.innerHTML = "";
-  const allBtn = document.createElement("button");
-  allBtn.type = "button";
-  allBtn.className = "shelf-tab";
-  allBtn.setAttribute("role", "tab");
-  allBtn.dataset.shelf = "all";
-  allBtn.textContent = "All";
-  els.shelfTabs.appendChild(allBtn);
-
-  for (const s of SHELVES) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "shelf-tab";
-    b.setAttribute("role", "tab");
-    b.dataset.shelf = s.id;
-    b.textContent = s.label;
-    els.shelfTabs.appendChild(b);
-  }
-
+function initSortAndFilters() {
   els.sort.innerHTML = SORT_OPTIONS.map((o) => `<option value="${o.id}">${o.label}</option>`).join("");
+  if (els.filterReadingStatus) {
+    els.filterReadingStatus.innerHTML =
+      `<option value="">All statuses</option>` +
+      READING_STATUSES.map((s) => `<option value="${s.id}">${s.label}</option>`).join("");
+  }
 }
 
-function setActiveTabs() {
-  els.shelfTabs.querySelectorAll(".shelf-tab").forEach((btn) => {
-    btn.setAttribute("aria-selected", btn.dataset.shelf === activeShelf ? "true" : "false");
+function fillBookShelfFormSelects() {
+  if (!els.bookUserShelf || !els.bookReadingStatus) return;
+  els.bookUserShelf.innerHTML = "";
+  for (const s of sortedUserShelves(state)) {
+    const opt = document.createElement("option");
+    opt.value = s.id;
+    opt.textContent = s.name;
+    els.bookUserShelf.appendChild(opt);
+  }
+  els.bookReadingStatus.innerHTML = READING_STATUSES.map(
+    (x) => `<option value="${x.id}">${x.label}</option>`
+  ).join("");
+}
+
+function updateShelfActiveHeading() {
+  if (!els.shelfActiveHeading) return;
+  if (activeUserShelfId === null) {
+    els.shelfActiveHeading.textContent = "All books";
+  } else {
+    els.shelfActiveHeading.textContent = userShelfName(state, activeUserShelfId);
+  }
+}
+
+function validateActiveUserShelfSelection() {
+  if (activeUserShelfId != null && !state.userShelves.some((s) => s.id === activeUserShelfId)) {
+    activeUserShelfId = getDefaultShelfId(state) || null;
+  }
+}
+
+function setMainView(view) {
+  if (view !== "library" && view !== "want_list" && view !== "series") return;
+  activeMainView = view;
+  renderAll();
+}
+
+function updateMainViewPanes() {
+  const lib = document.getElementById("pane-library");
+  const want = document.getElementById("pane-want");
+  const series = document.getElementById("pane-series");
+  if (lib) lib.classList.toggle("hidden", activeMainView !== "library");
+  if (want) want.classList.toggle("hidden", activeMainView !== "want_list");
+  if (series) series.classList.toggle("hidden", activeMainView !== "series");
+
+  document.querySelectorAll(".nav-rail-card[data-main-view]").forEach((btn) => {
+    const v = btn.dataset.mainView;
+    const on = v === activeMainView;
+    btn.classList.toggle("nav-rail-card--active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
   });
+}
+
+function renderShelfSidebar() {
+  if (!els.shelfList) return;
+  els.shelfList.innerHTML = "";
+
+  const libActive = activeMainView === "library";
+  const allBtn = document.createElement("button");
+  allBtn.type = "button";
+  allBtn.className = "shelf-row" + (libActive && activeUserShelfId === null ? " shelf-row--active" : "");
+  allBtn.setAttribute("role", "listitem");
+  allBtn.textContent = "All books";
+  allBtn.addEventListener("click", () => {
+    activeMainView = "library";
+    activeUserShelfId = null;
+    renderAll();
+  });
+  els.shelfList.appendChild(allBtn);
+
+  for (const s of sortedUserShelves(state)) {
+    const row = document.createElement("div");
+    row.className = "shelf-row-wrap";
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "shelf-row" + (libActive && activeUserShelfId === s.id ? " shelf-row--active" : "");
+    btn.setAttribute("role", "listitem");
+    const count = state.books.filter((b) => b.userShelfId === s.id).length;
+    btn.textContent = count ? `${s.name} (${count})` : s.name;
+    btn.addEventListener("click", () => {
+      activeMainView = "library";
+      activeUserShelfId = s.id;
+      renderAll();
+    });
+
+    const ren = document.createElement("button");
+    ren.type = "button";
+    ren.className = "shelf-row-action";
+    ren.textContent = "✎";
+    ren.setAttribute("aria-label", `Rename ${s.name}`);
+    ren.addEventListener("click", (e) => {
+      e.stopPropagation();
+      renameUserShelfPrompt(s.id);
+    });
+
+    row.appendChild(btn);
+    row.appendChild(ren);
+
+    if (!s.isDefault) {
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "shelf-row-action shelf-row-action--danger";
+      del.setAttribute("aria-label", `Remove ${s.name}`);
+      del.textContent = "×";
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        removeUserShelfById(s.id);
+      });
+      row.appendChild(del);
+    }
+
+    els.shelfList.appendChild(row);
+  }
+
+  if (els.btnAddUserShelf) {
+    els.btnAddUserShelf.disabled = countCustomUserShelves(state) >= MAX_CUSTOM_USER_SHELVES;
+  }
+}
+
+function addUserShelfFromInput() {
+  const name = (els.newShelfName?.value || "").trim();
+  if (!name) {
+    alert("Enter a name for the new shelf.");
+    return;
+  }
+  if (countCustomUserShelves(state) >= MAX_CUSTOM_USER_SHELVES) {
+    alert(
+      `You can add at most ${MAX_CUSTOM_USER_SHELVES} custom shelves in addition to ${DEFAULT_USER_SHELF_NAME}.`
+    );
+    return;
+  }
+  const now = new Date().toISOString();
+  const row = {
+    id: uuid(),
+    name,
+    isDefault: false,
+    createdAt: now,
+    updatedAt: now,
+  };
+  state.userShelves.push(row);
+  els.newShelfName.value = "";
+  activeMainView = "library";
+  activeUserShelfId = row.id;
+  persist();
+  renderAll();
+}
+
+function removeUserShelfById(shelfId) {
+  const s = state.userShelves.find((x) => x.id === shelfId);
+  if (!s || s.isDefault) return;
+  const defaultId = getDefaultShelfId(state);
+  if (!defaultId) return;
+  const defaultName = state.userShelves.find((x) => x.id === defaultId)?.name || DEFAULT_USER_SHELF_NAME;
+  if (!confirm(`Remove shelf “${s.name}”? Books on this shelf move to “${defaultName}”.`)) {
+    return;
+  }
+  for (const b of state.books) {
+    if (b.userShelfId === shelfId) b.userShelfId = defaultId;
+  }
+  state.userShelves = state.userShelves.filter((x) => x.id !== shelfId);
+  if (activeUserShelfId === shelfId) activeUserShelfId = defaultId;
+  persist();
+  renderAll();
+}
+
+function renameUserShelfPrompt(shelfId) {
+  const s = state.userShelves.find((x) => x.id === shelfId);
+  if (!s) return;
+  const name = window.prompt("Shelf name", s.name);
+  if (name == null) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  s.name = trimmed;
+  s.updatedAt = new Date().toISOString();
+  persist();
+  renderAll();
 }
 
 function renderBookList() {
@@ -893,8 +1807,16 @@ function renderBookList() {
   const type = els.filterType.value;
   const ownership = els.filterOwnership.value;
   const favoritesOnly = els.filterFavorites.checked;
+  const readingStatusFilter = els.filterReadingStatus?.value || "";
 
-  let list = filterBooks(state.books, { shelfTab: activeShelf, q, type, favoritesOnly, ownership });
+  let list = filterBooks(state.books, {
+    userShelfId: activeUserShelfId,
+    readingStatusFilter,
+    q,
+    type,
+    favoritesOnly,
+    ownership,
+  });
   list = sortBooks(list, sortId);
 
   els.listEmpty.classList.toggle("hidden", list.length > 0);
@@ -904,8 +1826,9 @@ function renderBookList() {
     const li = document.createElement("li");
     li.className = "book-card";
 
+    const rs = readingStatusOf(b);
     const spine = document.createElement("span");
-    spine.className = `book-card-spine book-card-spine--${b.shelf || "wishlist"}`;
+    spine.className = `book-card-spine book-card-spine--${rs}`;
     spine.setAttribute("aria-hidden", "true");
 
     const body = document.createElement("div");
@@ -923,7 +1846,8 @@ function renderBookList() {
     }
     const meta = document.createElement("p");
     meta.className = "book-card-meta";
-    meta.textContent = `${b.author} · ${typeLabel(b.type)} · ${ownershipLabel(b.ownership)} · ${shelfLabel(b.shelf)}`;
+    const shelfBit = activeUserShelfId == null ? ` · ${userShelfName(state, b.userShelfId)}` : "";
+    meta.textContent = `${b.author} · ${typeLabel(b.type)} · ${ownershipLabel(b.ownership)} · ${readingStatusLabel(rs)}${shelfBit}`;
 
     const tagsRow = document.createElement("div");
     tagsRow.className = "book-card-tags";
@@ -952,7 +1876,12 @@ function renderBookList() {
 
     body.appendChild(titleRow);
     body.appendChild(meta);
-    body.appendChild(tagsRow);
+
+    const detailsWrap = document.createElement("div");
+    detailsWrap.className = "book-card-details";
+    const isExpanded = expandedBookIds.has(b.id);
+    if (!isExpanded) detailsWrap.classList.add("hidden");
+    detailsWrap.appendChild(tagsRow);
 
     if (b.seriesId) {
       const sMeta = state.series.find((s) => s.id === b.seriesId);
@@ -960,10 +1889,10 @@ function renderBookList() {
       sb.className = "series-badge";
       const vol = b.volumeInSeries != null ? `Vol. ${b.volumeInSeries}` : "Series";
       sb.textContent = sMeta ? `${sMeta.name} · ${vol}` : vol;
-      body.appendChild(sb);
+      detailsWrap.appendChild(sb);
     }
 
-    if (b.shelf === "read") {
+    if (readingStatusOf(b) === "read") {
       if (b.rating) {
         const rating = document.createElement("p");
         rating.className = "series-badge";
@@ -972,7 +1901,7 @@ function renderBookList() {
         else if (b.rating === "okay") rating.textContent = "Rating: Okay";
         else if (b.rating === "good") rating.textContent = "Rating: Good";
         else if (b.rating === "great") rating.textContent = "Rating: Great";
-        body.appendChild(rating);
+        detailsWrap.appendChild(rating);
       }
       if (!b.readDateUnknown && b.readAt) {
         const finished = document.createElement("p");
@@ -980,10 +1909,11 @@ function renderBookList() {
         const dt = new Date(b.readAt);
         if (!Number.isNaN(dt.getTime())) {
           finished.textContent = `Finished: ${dt.toLocaleDateString()}`;
-          body.appendChild(finished);
+          detailsWrap.appendChild(finished);
         }
       }
     }
+    body.appendChild(detailsWrap);
 
     const actions = document.createElement("div");
     actions.className = "book-card-actions";
@@ -994,20 +1924,32 @@ function renderBookList() {
     editBtn.textContent = "Edit";
     editBtn.addEventListener("click", () => openBookModal(b.id));
 
-    const shelfQuick = document.createElement("select");
-    shelfQuick.className = "select select-shelf-quick";
-    shelfQuick.setAttribute("aria-label", "Change shelf");
-    for (const s of SHELVES) {
+    const detailsBtn = document.createElement("button");
+    detailsBtn.type = "button";
+    detailsBtn.className = "btn-small btn-caret-toggle";
+    detailsBtn.textContent = isExpanded ? "▾" : "▸";
+    detailsBtn.setAttribute("aria-label", isExpanded ? "Collapse details" : "Expand details");
+    detailsBtn.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+    detailsBtn.addEventListener("click", () => {
+      if (expandedBookIds.has(b.id)) expandedBookIds.delete(b.id);
+      else expandedBookIds.add(b.id);
+      renderBookList();
+    });
+
+    const statusQuick = document.createElement("select");
+    statusQuick.className = "select select-shelf-quick";
+    statusQuick.setAttribute("aria-label", "Reading status");
+    for (const s of READING_STATUSES) {
       const opt = document.createElement("option");
       opt.value = s.id;
       opt.textContent = s.label;
-      if (s.id === b.shelf) opt.selected = true;
-      shelfQuick.appendChild(opt);
+      if (s.id === rs) opt.selected = true;
+      statusQuick.appendChild(opt);
     }
-    shelfQuick.addEventListener("change", () => {
-      const prev = b.shelf;
-      const next = shelfQuick.value;
-      b.shelf = next;
+    statusQuick.addEventListener("change", () => {
+      const prev = readingStatusOf(b);
+      const next = statusQuick.value;
+      b.readingStatus = next;
       if (next === "read" && prev !== "read") {
         b.readAt = new Date().toISOString();
         persist();
@@ -1015,16 +1957,34 @@ function renderBookList() {
         openRateModal(b.id);
         return;
       }
-      if (next !== "read") {
-        // optional: clear readAt when leaving read — keep for history
-      }
       b.updatedAt = new Date().toISOString();
       persist();
       renderAll();
     });
 
-    actions.appendChild(editBtn);
-    actions.appendChild(shelfQuick);
+    const shelfQuick = document.createElement("select");
+    shelfQuick.className = "select select-shelf-quick";
+    shelfQuick.setAttribute("aria-label", "Shelf");
+    for (const sh of sortedUserShelves(state)) {
+      const opt = document.createElement("option");
+      opt.value = sh.id;
+      opt.textContent = sh.name;
+      if (sh.id === b.userShelfId) opt.selected = true;
+      shelfQuick.appendChild(opt);
+    }
+    shelfQuick.addEventListener("change", () => {
+      b.userShelfId = shelfQuick.value;
+      b.updatedAt = new Date().toISOString();
+      persist();
+      renderAll();
+    });
+
+    actions.appendChild(detailsBtn);
+    if (isExpanded) {
+      actions.appendChild(editBtn);
+      actions.appendChild(statusQuick);
+      actions.appendChild(shelfQuick);
+    }
 
     li.appendChild(spine);
     li.appendChild(body);
@@ -1264,7 +2224,8 @@ function renderSeries() {
       const li = document.createElement("li");
       li.style.fontSize = "0.875rem";
       li.style.color = "var(--text-muted)";
-      const st = v.shelf === "read" ? "✓" : v.shelf === "dnf" ? "✗ DNF" : "○";
+      const st =
+        readingStatusOf(v) === "read" ? "✓" : readingStatusOf(v) === "dnf" ? "✗ DNF" : "○";
       li.textContent = `${st} ${v.title}${v.volumeInSeries != null ? ` (#${v.volumeInSeries})` : ""}`;
       volList.appendChild(li);
     }
@@ -1307,10 +2268,13 @@ function confirmSeriesRemove() {
 }
 
 function renderAll() {
-  const validShelf = new Set(["all", ...SHELVES.map((s) => s.id)]);
-  if (!validShelf.has(activeShelf)) activeShelf = "all";
+  ensureDefaultUserShelf(state);
+  assignBookUserShelfIds(state);
+  validateActiveUserShelfSelection();
   if (syncGoalPeriods(state)) persist();
-  setActiveTabs();
+  renderShelfSidebar();
+  updateMainViewPanes();
+  updateShelfActiveHeading();
   renderBookList();
   renderSeriesNameSuggestions();
   renderWantList();
@@ -1421,7 +2385,7 @@ function loadTheme() {
 }
 
 function updateBookFinishedVisibility() {
-  const show = els.bookShelf.value === "read";
+  const show = els.bookReadingStatus && els.bookReadingStatus.value === "read";
   els.bookFinishedWrap.classList.toggle("hidden", !show);
   if (show && !els.bookFinishedDate.value) {
     els.bookFinishedDate.value = localYMD(new Date());
@@ -1459,26 +2423,31 @@ function openBookModal(bookId, opts = {}) {
 
   els.modalBookTitle.textContent = isEdit ? "Edit book" : adoptW ? "Add to library" : "Add book";
   els.btnDeleteBook.hidden = !isEdit;
-  els.btnEditRating.hidden = !(isEdit && b?.shelf === "read");
+  fillBookShelfFormSelects();
+  els.btnEditRating.hidden = !(isEdit && b && readingStatusOf(b) === "read");
   els.bookId.value = b?.id || "";
 
   if (isEdit && b) {
     els.bookTitle.value = b.title || "";
     els.bookAuthor.value = b.author || "";
     els.bookType.value = b.type || "physical";
-    els.bookShelf.value = b.shelf || "wishlist";
+    els.bookUserShelf.value = b.userShelfId || getDefaultShelfId(state) || "";
+    els.bookReadingStatus.value = readingStatusOf(b);
     els.bookOwnership.value = b.ownership === "borrowed" ? "borrowed" : "owned";
-    const readUnknown = !!b.readDateUnknown || (b.shelf === "read" && !b.readAt);
+    const readUnknown = !!b.readDateUnknown || (readingStatusOf(b) === "read" && !b.readAt);
     els.bookDateUnknown.checked = readUnknown;
     els.bookFinishedDate.value =
-      b.shelf === "read" && !readUnknown ? readAtToDateInputValue(b.readAt) || localYMD(new Date()) : "";
+      readingStatusOf(b) === "read" && !readUnknown
+        ? readAtToDateInputValue(b.readAt) || localYMD(new Date())
+        : "";
     els.bookTags.value = (b.tags || []).join(", ");
     els.bookRecommended.value = b.recommendedBy || "";
   } else if (adoptW) {
     els.bookTitle.value = adoptW.title || "";
     els.bookAuthor.value = adoptW.author || "";
     els.bookType.value = "physical";
-    els.bookShelf.value = "wishlist";
+    els.bookUserShelf.value = activeUserShelfId || getDefaultShelfId(state) || "";
+    els.bookReadingStatus.value = "wishlist";
     els.bookOwnership.value = "owned";
     els.bookDateUnknown.checked = false;
     els.bookFinishedDate.value = "";
@@ -1488,7 +2457,8 @@ function openBookModal(bookId, opts = {}) {
     els.bookTitle.value = "";
     els.bookAuthor.value = "";
     els.bookType.value = "physical";
-    els.bookShelf.value = "wishlist";
+    els.bookUserShelf.value = activeUserShelfId || getDefaultShelfId(state) || "";
+    els.bookReadingStatus.value = "wishlist";
     els.bookOwnership.value = "owned";
     els.bookDateUnknown.checked = false;
     els.bookFinishedDate.value = "";
@@ -1540,7 +2510,7 @@ function submitBookForm(e) {
   e.preventDefault();
   const id = els.bookId.value || uuid();
   const prev = state.books.find((x) => x.id === id);
-  const prevShelf = prev?.shelf;
+  const prevReading = prev ? readingStatusOf(prev) : null;
 
   const title = els.bookTitle.value.trim();
   const author = els.bookAuthor.value.trim();
@@ -1567,13 +2537,14 @@ function submitBookForm(e) {
     volumeInSeries = null;
   }
 
-  const shelf = els.bookShelf.value;
+  const userShelfId = els.bookUserShelf.value || getDefaultShelfId(state);
+  const readingStatus = els.bookReadingStatus.value;
   const ownership = els.bookOwnership.value === "borrowed" ? "borrowed" : "owned";
   const now = new Date().toISOString();
 
   let readAt = prev?.readAt ?? null;
-  const readDateUnknown = shelf === "read" ? !!els.bookDateUnknown.checked : false;
-  if (shelf === "read") {
+  const readDateUnknown = readingStatus === "read" ? !!els.bookDateUnknown.checked : false;
+  if (readingStatus === "read") {
     if (readDateUnknown) {
       readAt = null;
     } else {
@@ -1589,7 +2560,8 @@ function submitBookForm(e) {
     type: els.bookType.value,
     tags: parseTags(els.bookTags.value),
     recommendedBy: els.bookRecommended.value.trim() || "",
-    shelf,
+    userShelfId,
+    readingStatus,
     ownership,
     seriesId,
     volumeInSeries,
@@ -1601,7 +2573,7 @@ function submitBookForm(e) {
     updatedAt: now,
   };
 
-  const becameRead = shelf === "read" && prevShelf !== "read";
+  const becameRead = readingStatus === "read" && prevReading !== "read";
 
   const idx = state.books.findIndex((x) => x.id === id);
   if (idx >= 0) state.books[idx] = book;
@@ -1746,16 +2718,16 @@ function deleteWantItem() {
 }
 
 // Events
-initShelfSelects();
+initSortAndFilters();
 loadTheme();
-setActiveTabs();
 renderExportReminder();
 
-els.shelfTabs.addEventListener("click", (e) => {
-  const btn = e.target.closest(".shelf-tab");
-  if (!btn) return;
-  activeShelf = btn.dataset.shelf;
-  renderAll();
+els.btnAddUserShelf?.addEventListener("click", addUserShelfFromInput);
+els.newShelfName?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    addUserShelfFromInput();
+  }
 });
 
 ["input", "change"].forEach((ev) => {
@@ -1764,10 +2736,18 @@ els.shelfTabs.addEventListener("click", (e) => {
   els.filterType.addEventListener(ev, () => renderBookList());
   els.filterOwnership.addEventListener(ev, () => renderBookList());
   els.filterFavorites.addEventListener(ev, () => renderBookList());
+  els.filterReadingStatus?.addEventListener(ev, () => renderBookList());
 });
 
 els.btnAdd.addEventListener("click", () => openBookModal(null));
-els.btnSettingsToggle?.addEventListener("click", () => toggleSettingsMenu());
+els.btnSettingsToggle?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleSettingsMenu();
+});
+els.btnProfileToggle?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleProfileMenu();
+});
 els.btnExportData?.addEventListener("click", () => exportDataFile());
 els.btnExportReminder?.addEventListener("click", () => exportDataFile());
 els.btnDismissExportReminder?.addEventListener("click", () => dismissExportReminder());
@@ -1799,9 +2779,9 @@ els.btnEditRating.addEventListener("click", () => {
 });
 els.formBook.addEventListener("submit", submitBookForm);
 
-els.bookShelf.addEventListener("change", () => {
+els.bookReadingStatus?.addEventListener("change", () => {
   updateBookFinishedVisibility();
-  if (els.bookShelf.value !== "read") {
+  if (els.bookReadingStatus.value !== "read") {
     els.bookDateUnknown.checked = false;
   }
   updateBookDateUnknownUI();
@@ -1925,6 +2905,56 @@ els.modalRateOverlay.querySelectorAll(".rating-btn").forEach((btn) => {
 els.btnRateSave.addEventListener("click", () => saveRating(false));
 els.btnRateSkip.addEventListener("click", () => saveRating(true));
 
+async function saveSupabaseConnection() {
+  const { url, anon } = readSupabaseFormForSave();
+  if (!url || !anon) {
+    setAuthStatus("Enter Supabase URL and anon key first.", true);
+    return;
+  }
+  localStorage.setItem(SUPABASE_URL_KEY, url);
+  localStorage.setItem(SUPABASE_ANON_KEY_KEY, anon);
+  syncSupabaseFormFields(url, anon);
+  sbClient = null;
+  supabaseAuthListenerAttached = false;
+  await initSupabaseAuth();
+}
+
+els.btnSaveSupabaseConfig?.addEventListener("click", saveSupabaseConnection);
+els.btnSaveSupabaseConfigProfile?.addEventListener("click", saveSupabaseConnection);
+els.btnSignUp?.addEventListener("click", async () => {
+  if (!ensureSupabaseClientForAuth()) return;
+  const email = (els.authEmail?.value || "").trim();
+  const password = els.authPassword?.value || "";
+  if (!email || !password) {
+    setAuthStatus("Enter email and password.", true);
+    return;
+  }
+  setAuthStatus("Creating account…", false);
+  const { error } = await sbClient.auth.signUp({ email, password });
+  if (error) setAuthStatus(`Sign up failed: ${error.message}`, true);
+  else setAuthStatus("Sign up successful. Check email if confirmation is enabled.", false);
+});
+els.btnSignIn?.addEventListener("click", async () => {
+  if (!ensureSupabaseClientForAuth()) return;
+  const email = (els.authEmail?.value || "").trim();
+  const password = els.authPassword?.value || "";
+  if (!email || !password) {
+    setAuthStatus("Enter email and password.", true);
+    return;
+  }
+  setAuthStatus("Signing in…", false);
+  const { error } = await sbClient.auth.signInWithPassword({ email, password });
+  if (error) {
+    setAuthStatus(`Sign in failed: ${error.message}`, true);
+    return;
+  }
+});
+els.btnSignOut?.addEventListener("click", async () => {
+  if (!ensureSupabaseClientForAuth()) return;
+  setAuthStatus("Signing out…", false);
+  await sbClient.auth.signOut();
+});
+
 els.settingTheme.addEventListener("change", () => {
   applyTheme(els.settingTheme.value);
 });
@@ -1936,15 +2966,25 @@ document.addEventListener("keydown", (e) => {
     else if (!els.modalSeriesRemoveOverlay.classList.contains("hidden")) closeSeriesRemoveConfirm();
     else if (!els.modalWantOverlay.classList.contains("hidden")) closeWantModal();
     else if (!els.modalBookOverlay.classList.contains("hidden")) closeBookModal();
-    else toggleSettingsMenu(false);
+    else {
+      toggleProfileMenu(false);
+      toggleSettingsMenu(false);
+    }
   }
 });
 
 document.addEventListener("click", (e) => {
-  if (!els.settingsMenu || !els.btnSettingsToggle) return;
   const target = e.target;
-  if (els.settingsMenu.contains(target) || els.btnSettingsToggle.contains(target)) return;
-  toggleSettingsMenu(false);
+  if (els.settingsMenu && els.btnSettingsToggle) {
+    if (!els.settingsMenu.contains(target) && !els.btnSettingsToggle.contains(target)) {
+      toggleSettingsMenu(false);
+    }
+  }
+  if (els.profileMenu && els.btnProfileToggle) {
+    if (!els.profileMenu.contains(target) && !els.btnProfileToggle.contains(target)) {
+      toggleProfileMenu(false);
+    }
+  }
 });
 
 window.addEventListener("scroll", () => {
@@ -1954,18 +2994,10 @@ els.btnScrollTop?.addEventListener("click", () => {
   window.scrollTo({ top: 0, behavior: "smooth" });
 });
 
-els.linkWantList?.addEventListener("click", (e) => {
-  e.preventDefault();
-  document.getElementById("want-list")?.scrollIntoView({ behavior: "smooth" });
-});
-els.linkGoals.addEventListener("click", (e) => {
-  e.preventDefault();
-  document.getElementById("goals")?.scrollIntoView({ behavior: "smooth" });
-});
-els.linkSeries.addEventListener("click", (e) => {
-  e.preventDefault();
-  document.getElementById("series")?.scrollIntoView({ behavior: "smooth" });
+document.querySelectorAll(".nav-rail-card[data-main-view]").forEach((btn) => {
+  btn.addEventListener("click", () => setMainView(btn.dataset.mainView));
 });
 
 renderAll();
 updateScrollTopVisibility();
+initSupabaseAuth();
