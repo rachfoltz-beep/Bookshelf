@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Book Shelf — track reading, series, and goals. Data stays on your device." />
+  <title>Book Shelf</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script>
+    (function () {
+      try {
+        if (localStorage.getItem("book_shelf_theme") === "dark") {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      } catch (_) {}
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <div class="page-backdrop" aria-hidden="true">
+    <span class="backdrop-book backdrop-book--1" aria-hidden="true"></span>
+    <span class="backdrop-book backdrop-book--2" aria-hidden="true"></span>
+    <span class="backdrop-leaf" aria-hidden="true">📖</span>
+  </div>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="brand">
+        <span class="brand-icon" aria-hidden="true">
+          <svg width="40" height="40" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <rect x="8" y="6" width="14" height="36" rx="1" fill="var(--book-spine)" />
+            <rect x="22" y="6" width="18" height="36" rx="1" fill="var(--book-cover)" stroke="var(--book-edge)" stroke-width="1" />
+            <line x1="25" y1="12" x2="36" y2="12" stroke="var(--book-page-line)" stroke-width="1" />
+            <line x1="25" y1="17" x2="34" y2="17" stroke="var(--book-page-line)" stroke-width="1" opacity="0.7" />
+            <line x1="25" y1="21" x2="35" y2="21" stroke="var(--book-page-line)" stroke-width="1" opacity="0.5" />
+          </svg>
+        </span>
+        <div>
+          <h1 class="brand-title">Book Shelf</h1>
+          <p class="brand-tagline">Your library, your pace</p>
+        </div>
+      </div>
+      <nav class="header-nav" aria-label="Main">
+        <button type="button" class="nav-btn nav-btn--primary" id="btn-add-book" aria-haspopup="dialog">Add book</button>
+        <a href="#want-list" class="nav-link" id="link-want-list">Want list</a>
+        <a href="#goals" class="nav-link" id="link-goals">Goals</a>
+        <a href="#series" class="nav-link" id="link-series">Series</a>
+        <div class="settings-menu-wrap">
+          <button type="button" class="icon-btn settings-toggle" id="btn-settings-toggle" aria-haspopup="true" aria-expanded="false" aria-controls="settings-menu" aria-label="Open settings">⚙</button>
+          <div class="settings-menu hidden" id="settings-menu" role="menu" aria-label="Settings">
+            <div class="settings-block settings-block--menu">
+              <h3 class="settings-subtitle">Appearance</h3>
+              <label class="field-row">
+                <span>Theme</span>
+                <select id="setting-theme" class="select">
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </label>
+            </div>
+            <div class="settings-block settings-block--menu">
+              <h3 class="settings-subtitle">Backup</h3>
+              <p class="field-hint">Export your data regularly to keep a backup.</p>
+              <div class="settings-actions">
+                <button type="button" class="btn btn-primary btn-compact" id="btn-export-data">Export data</button>
+                <button type="button" class="btn btn-ghost btn-compact" id="btn-import-data">Import data</button>
+              </div>
+              <input type="file" id="input-import-data" accept="application/json" class="sr-only" />
+            </div>
+            <div class="settings-block settings-block--menu">
+              <h3 class="settings-subtitle">Feedback</h3>
+              <p class="field-hint">Send ideas, bugs, or feature requests.</p>
+              <div class="settings-actions">
+                <a class="btn btn-primary btn-compact" id="btn-feedback" href="mailto:rach.foltz@gmail.com?subject=Book%20Shelf%20Feedback">Email feedback</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="main">
+    <div class="export-reminder hidden" id="export-reminder" role="status" aria-live="polite">
+      <p class="export-reminder-text">Friendly reminder: export your reading data to keep a backup.</p>
+      <div class="export-reminder-actions">
+        <button type="button" class="btn btn-primary btn-compact" id="btn-export-reminder">Export now</button>
+        <button type="button" class="btn btn-ghost btn-compact" id="btn-dismiss-export-reminder">Dismiss</button>
+      </div>
+    </div>
+
+    <section class="panel shelf-panel" aria-labelledby="shelf-heading">
+      <div class="panel-head">
+        <h2 id="shelf-heading" class="panel-title">Shelves</h2>
+        <div class="shelf-tabs" role="tablist" aria-label="Shelves"></div>
+      </div>
+
+      <div class="toolbar">
+        <label class="sr-only" for="search-books">Search</label>
+        <input type="search" id="search-books" class="input input-search" placeholder="Search title, author, tags…" autocomplete="off" />
+
+        <label class="field-inline">
+          <span class="field-label">Sort</span>
+          <select id="sort-books" class="select"></select>
+        </label>
+
+        <label class="field-inline">
+          <span class="field-label">Type</span>
+          <select id="filter-type" class="select">
+            <option value="">All types</option>
+            <option value="physical">Physical</option>
+            <option value="ebook">E-book</option>
+            <option value="audiobook">Audiobook</option>
+          </select>
+        </label>
+
+        <label class="field-inline">
+          <span class="field-label">Ownership</span>
+          <select id="filter-ownership" class="select" aria-label="Filter by owned or borrowed">
+            <option value="">All copies</option>
+            <option value="owned">Owned</option>
+            <option value="borrowed">Borrowed</option>
+          </select>
+        </label>
+
+        <label class="field-inline field-checkbox">
+          <input type="checkbox" id="filter-favorites" />
+          <span>Favorites only</span>
+        </label>
+      </div>
+
+      <p class="empty-hint hidden" id="list-empty">No books match. Try another shelf or filter.</p>
+      <ul class="book-list" id="book-list"></ul>
+    </section>
+
+    <section class="panel want-list-panel" id="want-list" aria-labelledby="want-list-heading">
+      <div class="want-list-head">
+        <h2 id="want-list-heading" class="panel-title">Want list</h2>
+        <button type="button" class="btn btn-primary btn-compact" id="btn-want-add">Add title</button>
+      </div>
+      <p class="panel-intro">Track books you want to read but don’t own and haven’t borrowed yet. Your <strong>To read</strong> shelf is for copies already on hand; this list is for titles you’re eyeing before you get them.</p>
+      <p class="empty-hint hidden" id="want-list-empty">Nothing here yet. Add books you’re curious about before you buy or borrow them.</p>
+      <ul class="want-list" id="want-list-items" aria-label="Books not in your library yet"></ul>
+    </section>
+
+    <section class="panel goals-panel" id="goals" aria-labelledby="goals-heading">
+      <h2 id="goals-heading" class="panel-title">Reading goals</h2>
+      <p class="panel-intro">Add a goal to track how many books you finish by week, month, or year. Progress counts books marked <strong>Read</strong> in that calendar period (with optional rules below).</p>
+      <div id="goals-root">
+        <div class="goals-empty hidden" id="goals-empty">
+          <p class="goals-empty-text">You don’t have a reading goal yet.</p>
+          <button type="button" class="btn btn-primary" id="btn-goal-first">Add a reading goal</button>
+        </div>
+        <div class="goals-list-wrap hidden" id="goals-list-wrap">
+          <ul class="goals-list" id="goals-list" aria-label="Your reading goals"></ul>
+          <button type="button" class="btn btn-ghost goals-add-another" id="btn-goal-another">Add another reading goal</button>
+        </div>
+      </div>
+
+      <details class="goals-history-block" id="goals-history-block">
+        <summary class="goals-history-summary">Goals history</summary>
+        <p class="goals-history-intro">Past periods are saved when a week, month, or year rolls over, or when you remove a goal. Each row shows how many qualifying books you finished versus your target.</p>
+        <p class="empty-hint hidden" id="goals-history-empty">No history yet.</p>
+        <ul class="goals-history-list" id="goals-history-list" aria-label="Past goal periods"></ul>
+      </details>
+    </section>
+
+    <section class="panel series-panel" id="series" aria-labelledby="series-heading">
+      <h2 id="series-heading" class="panel-title">Series progress</h2>
+      <p class="panel-intro">Books linked to the same series appear here. Progress is based on volumes you’ve added and marked read.</p>
+      <div id="series-list" class="series-list"></div>
+      <p class="empty-hint hidden" id="series-empty">No series yet. Add a book and mark it as part of a series.</p>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <p>Book Shelf — stored locally in your browser.</p>
+  </footer>
+
+  <!-- Want list item modal -->
+  <div class="modal-overlay hidden" id="modal-want-overlay" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-want-title" id="modal-want">
+      <header class="modal-header">
+        <h2 id="modal-want-title" class="modal-title">Add to want list</h2>
+        <button type="button" class="icon-btn" id="modal-want-close" aria-label="Close">×</button>
+      </header>
+      <form id="form-want" class="modal-body">
+        <input type="hidden" id="want-item-id" value="" />
+        <label class="field">
+          <span class="field-label">Title <abbr title="required">*</abbr></span>
+          <input type="text" id="want-title" class="input" required autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="field-label">Author</span>
+          <input type="text" id="want-author" class="input" placeholder="Optional" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="field-label">Notes</span>
+          <textarea id="want-notes" class="input input-textarea" rows="2" placeholder="Why it caught your eye, edition, links…"></textarea>
+        </label>
+        <div class="field field-tags-autocomplete">
+          <span class="field-label">Tags</span>
+          <div class="tags-input-wrap">
+            <input type="text" id="want-tags" class="input" placeholder="Comma-separated" autocomplete="off" aria-autocomplete="list" aria-controls="want-tags-suggestions" />
+            <ul id="want-tags-suggestions" class="tags-suggestions hidden" role="listbox" aria-label="Tag suggestions"></ul>
+          </div>
+        </div>
+        <label class="field">
+          <span class="field-label">Recommended by</span>
+          <input type="text" id="want-recommended" class="input" placeholder="Optional" autocomplete="off" />
+        </label>
+        <footer class="modal-footer">
+          <button type="button" class="btn btn-ghost" id="btn-want-delete" hidden>Delete</button>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-ghost" id="btn-want-cancel">Cancel</button>
+            <button type="submit" class="btn btn-primary">Save</button>
+          </div>
+        </footer>
+      </form>
+    </div>
+  </div>
+
+  <!-- Series remove confirm modal -->
+  <div class="modal-overlay hidden" id="modal-series-remove-overlay" aria-hidden="true">
+    <div class="modal modal--narrow" role="dialog" aria-modal="true" aria-labelledby="modal-series-remove-title">
+      <header class="modal-header">
+        <h2 id="modal-series-remove-title" class="modal-title">Are you sure?</h2>
+        <button type="button" class="icon-btn" id="modal-series-remove-close" aria-label="Close">×</button>
+      </header>
+      <div class="modal-body">
+        <p class="panel-intro" id="series-remove-message">This will hide the series from the Series section.</p>
+        <footer class="modal-footer">
+          <div class="modal-actions">
+            <button type="button" class="btn btn-ghost" id="btn-series-remove-cancel">Cancel</button>
+            <button type="button" class="btn btn-primary" id="btn-series-remove-confirm">Yes, hide it</button>
+          </div>
+        </footer>
+      </div>
+    </div>
+  </div>
+
+  <!-- Book form modal -->
+  <div class="modal-overlay hidden" id="modal-book-overlay" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-book-title" id="modal-book">
+      <header class="modal-header">
+        <h2 id="modal-book-title" class="modal-title">Add book</h2>
+        <button type="button" class="icon-btn" id="modal-book-close" aria-label="Close">×</button>
+      </header>
+      <form id="form-book" class="modal-body">
+        <input type="hidden" name="id" id="book-id" />
+
+        <label class="field">
+          <span class="field-label">Title <abbr title="required">*</abbr></span>
+          <input type="text" name="title" id="book-title" class="input" required autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="field-label">Author <abbr title="required">*</abbr></span>
+          <input type="text" name="author" id="book-author" class="input" required autocomplete="off" />
+        </label>
+
+        <label class="field">
+          <span class="field-label">Type</span>
+          <select name="type" id="book-type" class="select">
+            <option value="physical">Physical book</option>
+            <option value="ebook">E-book</option>
+            <option value="audiobook">Audiobook</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Shelf</span>
+          <select name="shelf" id="book-shelf" class="select"></select>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Owned or borrowed</span>
+          <select name="ownership" id="book-ownership" class="select">
+            <option value="owned">Owned</option>
+            <option value="borrowed">Borrowed</option>
+          </select>
+        </label>
+
+        <div id="book-finished-wrap" class="hidden">
+          <label class="field">
+            <span class="field-label">Date finished</span>
+            <input type="date" id="book-finished-date" class="input" />
+          </label>
+          <label class="field-checkbox">
+            <input type="checkbox" id="book-date-unknown" />
+            <span>Date unknown (won’t count toward goals)</span>
+          </label>
+        </div>
+
+        <div class="field field-tags-autocomplete">
+          <span class="field-label">Tags</span>
+          <p class="field-hint field-hint--modal">Previously used tags are suggested as you type. ✕ stops a tag from appearing in suggestions (your books stay the same).</p>
+          <div class="tags-input-wrap">
+            <input type="text" name="tags" id="book-tags" class="input" placeholder="Comma-separated, e.g. fantasy, book club" autocomplete="off" aria-autocomplete="list" aria-controls="book-tags-suggestions" />
+            <ul id="book-tags-suggestions" class="tags-suggestions hidden" role="listbox" aria-label="Tag suggestions"></ul>
+          </div>
+        </div>
+
+        <label class="field">
+          <span class="field-label">Recommended by</span>
+          <input type="text" name="recommendedBy" id="book-recommended" class="input" placeholder="Optional" autocomplete="off" />
+        </label>
+
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">Series</legend>
+          <label class="field-checkbox">
+            <input type="checkbox" id="book-is-series" />
+            <span>This book is part of a series</span>
+          </label>
+          <div id="series-fields" class="series-fields hidden">
+            <label class="field">
+              <span class="field-label">Series name</span>
+              <input type="text" id="book-series-name" class="input" placeholder="e.g. The Expanse" autocomplete="off" list="series-name-options" />
+              <datalist id="series-name-options"></datalist>
+            </label>
+            <div class="field-row-split">
+              <label class="field">
+                <span class="field-label">Volume #</span>
+                <input type="number" id="book-series-vol" class="input" min="1" step="1" placeholder="1" />
+              </label>
+              <label class="field">
+                <span class="field-label">Total volumes</span>
+                <input type="number" id="book-series-total" class="input" min="1" step="1" placeholder="e.g. 9" />
+              </label>
+            </div>
+            <label class="field-checkbox">
+              <input type="checkbox" id="book-series-incomplete" />
+              <span>Series isn’t complete yet (total may change)</span>
+            </label>
+          </div>
+        </fieldset>
+
+        <footer class="modal-footer">
+          <button type="button" class="btn btn-ghost" id="btn-delete-book" hidden>Delete</button>
+          <button type="button" class="btn btn-ghost" id="btn-edit-rating" hidden>Edit rating</button>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-ghost" id="btn-cancel-book">Cancel</button>
+            <button type="submit" class="btn btn-primary">Save</button>
+          </div>
+        </footer>
+      </form>
+    </div>
+  </div>
+
+  <!-- Reading goal modal -->
+    <div class="modal-overlay hidden" id="modal-goal-overlay" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-goal-title" id="modal-goal">
+        <header class="modal-header">
+          <h2 id="modal-goal-title" class="modal-title">Add reading goal</h2>
+          <button type="button" class="icon-btn" id="modal-goal-close" aria-label="Close">×</button>
+        </header>
+        <form id="form-goal" class="modal-body">
+          <input type="hidden" id="goal-edit-id" value="" />
+
+          <fieldset class="fieldset fieldset--plain">
+            <legend class="fieldset-legend">Track by</legend>
+            <p class="field-hint">Choose the calendar period for this goal.</p>
+            <div class="goal-period-options" role="radiogroup" aria-label="Goal period">
+              <label class="goal-period-option">
+                <input type="radio" name="goal-period" value="week" checked />
+                <span>Week</span>
+              </label>
+              <label class="goal-period-option">
+                <input type="radio" name="goal-period" value="month" />
+                <span>Month</span>
+              </label>
+              <label class="goal-period-option">
+                <input type="radio" name="goal-period" value="year" />
+                <span>Year</span>
+              </label>
+            </div>
+          </fieldset>
+
+          <label class="field-checkbox goal-exclude-row">
+            <input type="checkbox" id="goal-exclude-audiobook" />
+            <span>Exclude audiobooks from counting toward this goal</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">How many books do you want to finish? <abbr title="required">*</abbr></span>
+            <input type="number" id="goal-target" class="input" min="1" step="1" required placeholder="e.g. 4" />
+          </label>
+
+          <footer class="modal-footer">
+            <div class="modal-actions">
+              <button type="button" class="btn btn-ghost" id="btn-goal-cancel">Cancel</button>
+              <button type="submit" class="btn btn-primary">Save goal</button>
+            </div>
+          </footer>
+        </form>
+      </div>
+    </div>
+
+    <div class="modal-overlay hidden" id="modal-rate-overlay" aria-hidden="true">
+    <div class="modal modal--narrow" role="dialog" aria-modal="true" aria-labelledby="modal-rate-title">
+      <header class="modal-header">
+        <h2 id="modal-rate-title" class="modal-title">How was it?</h2>
+        <button type="button" class="icon-btn" id="modal-rate-close" aria-label="Close">×</button>
+      </header>
+      <div class="modal-body">
+        <p class="rate-book-title" id="rate-book-label"></p>
+        <label class="field">
+          <span class="field-label">Finished on</span>
+          <input type="date" id="rate-finished-date" class="input" />
+        </label>
+        <label class="field-checkbox">
+          <input type="checkbox" id="rate-date-unknown" />
+          <span>Date unknown (won’t count toward goals)</span>
+        </label>
+        <div class="rating-emoji-row" role="group" aria-label="Rating">
+          <button type="button" class="rating-btn rating-btn--text" data-rating="terrible" aria-pressed="false">Terrible</button>
+          <button type="button" class="rating-btn rating-btn--text" data-rating="not_good" aria-pressed="false">Not good</button>
+          <button type="button" class="rating-btn rating-btn--text" data-rating="okay" aria-pressed="false">Okay</button>
+          <button type="button" class="rating-btn rating-btn--text" data-rating="good" aria-pressed="false">Good</button>
+          <button type="button" class="rating-btn rating-btn--text" data-rating="great" aria-pressed="false">Great</button>
+        </div>
+        <label class="field-checkbox field-checkbox--heart">
+          <input type="checkbox" id="rate-favorite" />
+          <span class="heart-label">♥ Mark as favorite</span>
+        </label>
+        <footer class="modal-footer modal-footer--stack">
+          <button type="button" class="btn btn-primary btn-block" id="btn-rate-save">Save</button>
+          <button type="button" class="btn btn-ghost btn-block" id="btn-rate-skip">Skip for now</button>
+        </footer>
+      </div>
+    </div>
+  </div>
+
+  <button type="button" class="scroll-top-btn hidden" id="btn-scroll-top" aria-label="Scroll to top">↑</button>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
