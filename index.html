@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="description" content="Book Shelf — track reading, series, and goals. Sign in to sync with Supabase." />
-  <title>Book Shelf</title>
+  <meta name="description" content="My Cozy Library — track reading, series, and goals. Sign in to sync with Supabase." />
+  <title>My Cozy Library</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet" />
@@ -30,7 +30,7 @@
 
   <div id="auth-gate" class="auth-gate">
     <div class="auth-gate-card panel" id="auth-gate-inner" tabindex="-1">
-      <h2 class="auth-gate-title">Book Shelf</h2>
+      <h2 class="auth-gate-title">My Cozy Library</h2>
       <p class="auth-gate-lead">Sign in or create an account to open your library. Your data syncs across devices with Supabase.</p>
 
       <div class="settings-block settings-block--auth">
@@ -83,8 +83,7 @@
           </svg>
         </span>
         <div>
-          <h1 class="brand-title">Book Shelf</h1>
-          <p class="brand-tagline">Your library, your pace</p>
+          <h1 class="brand-title">My Cozy Library</h1>
         </div>
       </div>
       <nav class="header-nav" aria-label="Main">
@@ -161,72 +160,138 @@
 
     <section class="panel app-dashboard-panel" aria-label="Library dashboard">
       <div class="app-split-layout">
-        <aside class="app-nav-rail" id="app-nav-rail" aria-label="Library sections">
-          <div class="app-nav-rail-inner">
-            <div class="app-nav-block app-nav-block--shelves">
-              <h3 class="shelf-sidebar-heading">Shelves</h3>
-              <div id="shelf-list" class="shelf-list" role="list"></div>
-              <div class="shelf-add-block">
-                <label class="sr-only" for="new-shelf-name">New shelf name</label>
-                <input type="text" id="new-shelf-name" class="input shelf-add-input" placeholder="New shelf name" maxlength="80" autocomplete="off" />
-                <button type="button" class="btn btn-ghost btn-compact" id="btn-add-user-shelf">Add shelf</button>
-              </div>
-            </div>
+        <aside class="app-nav-rail cozy-sidebar" id="app-nav-rail" aria-label="Library sections">
+          <div class="app-nav-rail-inner cozy-sidebar-inner">
+            <h3 class="cozy-sidebar-section-label">My library</h3>
+            <ul id="sidebar-my-library" class="cozy-sidebar-list"></ul>
 
-            <div class="nav-rail-cards" role="group" aria-label="Other views">
-              <button type="button" class="nav-rail-card" id="nav-card-want" data-main-view="want_list">
-                <span class="nav-rail-card-title">Want list</span>
-                <span class="nav-rail-card-desc">Titles before you buy or borrow</span>
-              </button>
-              <button type="button" class="nav-rail-card" id="nav-card-library" data-main-view="library">
-                <span class="nav-rail-card-title">Library</span>
-                <span class="nav-rail-card-desc">Books on your shelves</span>
-              </button>
-              <button type="button" class="nav-rail-card" id="nav-card-series" data-main-view="series">
-                <span class="nav-rail-card-title">Series progress</span>
-                <span class="nav-rail-card-desc">Reading progress by series</span>
-              </button>
-            </div>
+            <h3 class="cozy-sidebar-section-label">Shelves</h3>
+            <ul id="sidebar-shelves" class="cozy-sidebar-list"></ul>
 
-            <div class="app-goals-rail" id="goals-rail">
-              <h2 id="goals-heading" class="goals-rail-title">Reading goals</h2>
-              <p class="panel-intro goals-rail-intro">Add a goal to track how many books you finish by week, month, or year. Progress counts books with reading status <strong>Read</strong> in that calendar period (with optional rules below).</p>
-              <div id="goals-root">
-                <div class="goals-empty hidden" id="goals-empty">
-                  <p class="goals-empty-text">You don’t have a reading goal yet.</p>
-                  <button type="button" class="btn btn-primary" id="btn-goal-first">Add a reading goal</button>
-                </div>
-                <div class="goals-list-wrap hidden" id="goals-list-wrap">
-                  <ul class="goals-list" id="goals-list" aria-label="Your reading goals"></ul>
-                  <button type="button" class="btn btn-ghost goals-add-another" id="btn-goal-another">Add another reading goal</button>
-                </div>
-              </div>
-
-              <details class="goals-history-block" id="goals-history-block">
-                <summary class="goals-history-summary">Goals history</summary>
-                <p class="goals-history-intro">Past periods are saved when a week, month, or year rolls over, or when you remove a goal. Each row shows how many qualifying books you finished versus your target.</p>
-                <p class="empty-hint hidden" id="goals-history-empty">No history yet.</p>
-                <ul class="goals-history-list" id="goals-history-list" aria-label="Past goal periods"></ul>
-              </details>
+            <div class="shelf-add-block cozy-sidebar-add-shelf">
+              <label class="sr-only" for="new-shelf-name">New shelf name</label>
+              <input type="text" id="new-shelf-name" class="input shelf-add-input" placeholder="New shelf name" maxlength="80" autocomplete="off" />
+              <button type="button" class="btn btn-ghost btn-compact" id="btn-add-user-shelf">Add shelf</button>
             </div>
           </div>
         </aside>
 
         <div class="app-content-rail" id="app-content-rail">
           <div id="pane-library" class="content-pane">
-            <h2 id="shelf-heading" class="panel-title shelf-panel-main-title">Your library</h2>
-            <p class="panel-intro shelf-panel-intro">Pick a <strong>shelf</strong> on the left to see only those books. Each book also has a <strong>reading status</strong> (to read, in progress, read, DNF). Add shelves for book clubs, work reading, or anything else—up to 25 custom shelves plus your default <strong>My Bookshelf</strong>.</p>
-            <h3 id="shelf-active-heading" class="shelf-active-heading"></h3>
+            <div id="library-dashboard-above-controls" class="library-dashboard-above-controls">
+              <h2 id="shelf-heading" class="panel-title shelf-panel-main-title">Your library</h2>
+              <p class="panel-intro shelf-panel-intro">Pick a <strong>shelf</strong> or <strong>status</strong> on the left to narrow your library. Each book has a reading status (to read, in progress, read, on hold, DNF). Add up to 25 custom shelves besides your default <strong>My Bookshelf</strong>.</p>
+              <div class="dashboard-top-cards">
+                <section class="goals-main-summary" id="goals-main-summary" aria-label="Reading goals summary">
+                  <div class="goals-main-summary-head">
+                    <p class="goals-main-summary-kicker">Goals snapshot</p>
+                    <button type="button" class="btn-small goals-main-summary-btn" id="btn-goals-open">Manage goals</button>
+                  </div>
+                  <div class="goals-main-summary-grid" id="goals-main-summary-grid">
+                    <p class="goals-main-summary-empty">No goals set yet.</p>
+                  </div>
+                </section>
+                <section class="currently-reading" id="currently-reading-section" aria-label="Currently reading">
+                  <div class="currently-reading-head">
+                    <h3 class="currently-reading-title">Currently Reading</h3>
+                    <div class="currently-reading-nav hidden" id="currently-reading-nav">
+                      <button type="button" class="icon-btn" id="currently-reading-prev" aria-label="Show previous books">←</button>
+                      <button type="button" class="icon-btn" id="currently-reading-next" aria-label="Show next books">→</button>
+                    </div>
+                  </div>
+                  <p class="empty-hint hidden currently-reading-empty" id="currently-reading-empty">No books are marked in progress right now.</p>
+                  <ul class="currently-reading-list" id="currently-reading-list"></ul>
+                </section>
+              </div>
+              <h3 id="shelf-active-heading" class="shelf-active-heading"></h3>
+            </div>
 
-            <div class="toolbar">
-              <label class="sr-only" for="search-books">Search</label>
-              <input type="search" id="search-books" class="input input-search" placeholder="Search title, author, tags…" autocomplete="off" />
+            <div id="library-minimal-head" class="library-minimal-head hidden" aria-hidden="true">
+              <div class="library-minimal-head-start">
+                <span class="library-minimal-icon" aria-hidden="true">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M7 5h8a2 2 0 0 1 2 2v11a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V6a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.5"/>
+                    <path d="M7 5v14a1 1 0 0 0 1 1h10" stroke="currentColor" stroke-width="1.5"/>
+                  </svg>
+                </span>
+                <h2 class="panel-title library-minimal-title" id="library-minimal-title">Reading</h2>
+              </div>
+              <button type="button" class="status-colors-trigger" id="btn-status-colors-minimal" aria-expanded="false" aria-controls="status-colors-popover">
+                <span class="status-colors-trigger-icon" aria-hidden="true">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.75"/>
+                    <path d="M12 16v-5M12 8h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  </svg>
+                </span>
+                Status colors
+              </button>
+            </div>
 
-              <label class="field-inline">
-                <span class="field-label">Sort</span>
-                <select id="sort-books" class="select"></select>
-              </label>
+            <div class="library-controls" id="library-controls">
+              <div class="library-search-row">
+                <label class="sr-only" for="search-books">Search</label>
+                <div class="library-search-wrap">
+                  <span class="library-search-icon" aria-hidden="true">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" stroke="currentColor" stroke-width="2" />
+                      <path d="M16.5 16.5 21 21" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                    </svg>
+                  </span>
+                  <input type="search" id="search-books" class="input library-search-input" placeholder="Search by title, author, or tag…" autocomplete="off" />
+                </div>
+              </div>
+              <div class="library-toolbar-row">
+                <div class="library-toolbar-main">
+                  <div class="library-want-add-wrap">
+                    <button type="button" class="btn btn-primary btn-compact" id="btn-want-add">Add title</button>
+                  </div>
+                  <div class="library-toolbar-sort-view">
+                    <div class="sort-control">
+                      <span class="sort-control-prefix" aria-hidden="true">Sort:</span>
+                      <select id="sort-books" class="select select-sort" aria-label="Sort books"></select>
+                    </div>
+                    <div class="view-mode-toggle" role="group" aria-label="Book layout">
+                      <button type="button" class="btn view-mode-btn view-mode-btn--icon" id="btn-view-grid" aria-pressed="false" aria-label="Grid view">
+                        <svg class="view-mode-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                          <rect x="3" y="3" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.75" />
+                          <rect x="13" y="3" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.75" />
+                          <rect x="3" y="13" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.75" />
+                          <rect x="13" y="13" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.75" />
+                        </svg>
+                      </button>
+                      <button type="button" class="btn view-mode-btn view-mode-btn--icon" id="btn-view-list" aria-pressed="true" aria-label="List view">
+                        <svg class="view-mode-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                          <path d="M7 7h14M7 12h14M7 17h14" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" />
+                          <circle cx="4" cy="7" r="1.25" fill="currentColor" />
+                          <circle cx="4" cy="12" r="1.25" fill="currentColor" />
+                          <circle cx="4" cy="17" r="1.25" fill="currentColor" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="library-filters-only">
+                    <button type="button" class="btn btn-ghost btn-compact filters-toggle-btn" id="btn-filters-toggle" aria-expanded="false" aria-controls="filters-drawer">
+                      Filters
+                      <span class="filters-active-badge hidden" id="filters-active-badge" aria-hidden="true">0</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="library-toolbar-meta">
+                  <button type="button" class="status-colors-trigger library-status-colors--full" id="btn-status-colors-full" aria-expanded="false" aria-controls="status-colors-popover">
+                    <span class="status-colors-trigger-icon" aria-hidden="true">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.75"/>
+                        <path d="M12 16v-5M12 8h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                      </svg>
+                    </span>
+                    Status colors
+                  </button>
+                  <p class="library-book-count" id="book-list-count" aria-live="polite">0 books</p>
+                </div>
+              </div>
+            </div>
 
+            <div class="filters-drawer hidden" id="filters-drawer">
               <label class="field-inline">
                 <span class="field-label">Status</span>
                 <select id="filter-reading-status" class="select" aria-label="Filter by reading status"></select>
@@ -257,25 +322,106 @@
               </label>
             </div>
 
-            <p class="empty-hint hidden" id="list-empty">No books match. Try another shelf or filter.</p>
-            <ul class="book-list" id="book-list"></ul>
-          </div>
-
-          <div id="pane-want" class="content-pane hidden" aria-labelledby="want-list-heading">
-            <div class="want-list-head">
-              <h2 id="want-list-heading" class="panel-title">Want list</h2>
-              <button type="button" class="btn btn-primary btn-compact" id="btn-want-add">Add title</button>
+            <div id="library-books-stack" class="library-books-stack">
+              <p class="empty-hint hidden" id="list-empty">No books match. Try another shelf or filter.</p>
+              <ul class="book-list" id="book-list"></ul>
             </div>
-            <p class="panel-intro">Track books you want to read but don’t own and haven’t borrowed yet. Use a library shelf with status <strong>To read</strong> for copies you already have; use this list for titles you’re eyeing before you buy or borrow them.</p>
-            <p class="empty-hint hidden" id="want-list-empty">Nothing here yet. Add books you’re curious about before you buy or borrow them.</p>
-            <ul class="want-list" id="want-list-items" aria-label="Books not in your library yet"></ul>
+            <div id="library-want-stack" class="library-want-stack hidden">
+              <p class="empty-hint hidden" id="want-list-empty">Nothing here yet. Add books you’re curious about before you buy or borrow them.</p>
+              <ul class="book-list book-list--list" id="want-list-items" aria-label="Books not in your library yet"></ul>
+            </div>
+
+            <div id="status-colors-popover" class="status-colors-popover hidden" role="dialog" aria-modal="true" aria-label="Status colors" aria-hidden="true">
+              <ul class="status-colors-popover-list">
+                <li>
+                  <span class="status-colors-dot status-colors-dot--in_progress" aria-hidden="true"></span>
+                  Currently Reading
+                </li>
+                <li>
+                  <span class="status-colors-dot status-colors-dot--read" aria-hidden="true"></span>
+                  Read
+                </li>
+                <li>
+                  <span class="status-colors-dot status-colors-dot--wishlist" aria-hidden="true"></span>
+                  To Read
+                </li>
+                <li>
+                  <span class="status-colors-dot status-colors-dot--on_hold" aria-hidden="true"></span>
+                  On Hold
+                </li>
+                <li>
+                  <span class="status-colors-dot status-colors-dot--dnf" aria-hidden="true"></span>
+                  Did Not Finish
+                </li>
+              </ul>
+            </div>
           </div>
 
-          <div id="pane-series" class="content-pane hidden" aria-labelledby="series-heading">
-            <h2 id="series-heading" class="panel-title">Series progress</h2>
-            <p class="panel-intro">Books linked to the same series appear here. Progress is based on volumes you’ve added and marked read.</p>
+          <div id="pane-want" class="content-pane hidden" aria-hidden="true"></div>
+
+          <div id="pane-series" class="content-pane content-pane--series hidden" aria-labelledby="series-heading">
+            <h2 id="series-heading" class="panel-title series-page-title">Series Progress</h2>
+            <div class="series-tabs" role="tablist" aria-label="Series scope">
+              <button type="button" id="series-tab-active" class="series-tab is-active" role="tab" aria-selected="true">
+                <span>Active</span><span id="series-tab-count-active" class="series-tab-badge">0</span>
+              </button>
+              <button type="button" id="series-tab-completed" class="series-tab" role="tab" aria-selected="false">
+                <span aria-hidden="true">🏆</span><span>Completed</span><span id="series-tab-count-completed" class="series-tab-badge">0</span>
+              </button>
+              <button type="button" id="series-tab-archived" class="series-tab" role="tab" aria-selected="false">
+                <span>Archived</span><span id="series-tab-count-archived" class="series-tab-badge">0</span>
+              </button>
+            </div>
+            <div class="series-toolbar">
+              <p id="series-count" class="series-count">0 series in your library</p>
+              <div class="series-toolbar-controls">
+                <label class="series-control">
+                  <span class="series-control-label">Filter</span>
+                  <select id="series-filter" class="select series-toolbar-select" aria-label="Filter series list">
+                    <option value="all">All</option>
+                    <option value="in_progress">In Progress</option>
+                    <option value="read">Completed</option>
+                    <option value="wishlist">Not Started</option>
+                    <option value="on_hold">On Hold</option>
+                    <option value="dnf">Did Not Finish</option>
+                  </select>
+                </label>
+                <label class="series-control">
+                  <span class="series-control-label">Sort</span>
+                  <select id="series-sort" class="select series-toolbar-select" aria-label="Sort series list">
+                    <option value="name_asc">Name</option>
+                    <option value="progress_desc">Completion %</option>
+                    <option value="activity_desc">Recently Added</option>
+                  </select>
+                </label>
+              </div>
+            </div>
             <div id="series-list" class="series-list"></div>
             <p class="empty-hint hidden" id="series-empty">No series yet. Add a book and mark it as part of a series.</p>
+          </div>
+
+          <div id="pane-goals" class="content-pane hidden" aria-labelledby="goals-heading">
+            <div class="app-goals-rail" id="goals-rail">
+              <h2 id="goals-heading" class="goals-rail-title">Reading goals</h2>
+              <p class="panel-intro goals-rail-intro">Add a goal to track how many books you finish by week, month, or year. Progress counts books with reading status <strong>Read</strong> in that calendar period (with optional rules below).</p>
+              <div id="goals-root">
+                <div class="goals-empty hidden" id="goals-empty">
+                  <p class="goals-empty-text">You don’t have a reading goal yet.</p>
+                  <button type="button" class="btn btn-primary" id="btn-goal-first">Add a reading goal</button>
+                </div>
+                <div class="goals-list-wrap hidden" id="goals-list-wrap">
+                  <ul class="goals-list" id="goals-list" aria-label="Your reading goals"></ul>
+                  <button type="button" class="btn btn-ghost goals-add-another" id="btn-goal-another">Add another reading goal</button>
+                </div>
+              </div>
+
+              <details class="goals-history-block" id="goals-history-block">
+                <summary class="goals-history-summary">Goals history</summary>
+                <p class="goals-history-intro">Past periods are saved when a week, month, or year rolls over, or when you remove a goal. Each row shows how many qualifying books you finished versus your target.</p>
+                <p class="empty-hint hidden" id="goals-history-empty">No history yet.</p>
+                <ul class="goals-history-list" id="goals-history-list" aria-label="Past goal periods"></ul>
+              </details>
+            </div>
           </div>
         </div>
       </div>
@@ -284,11 +430,59 @@
   </main>
 
   <footer class="site-footer">
-    <p>Book Shelf — sign in to sync; data is also cached in your browser.</p>
+    <p>My Cozy Library — sign in to sync; data is also cached in your browser.</p>
   </footer>
 
-  <button type="button" class="scroll-top-btn hidden" id="btn-scroll-top" aria-label="Scroll to top">↑</button>
+  </div>
 
+  <!-- Book details slide-out panel -->
+  <div class="book-details-overlay hidden" id="book-details-overlay" aria-hidden="true">
+    <aside class="book-details-panel" id="book-details-panel" role="dialog" aria-modal="true" aria-labelledby="book-details-panel-title">
+      <header class="book-details-head">
+        <h2 id="book-details-panel-title" class="panel-title">Book details</h2>
+        <button type="button" class="icon-btn" id="book-details-close" aria-label="Close details">×</button>
+      </header>
+      <div class="book-details-body">
+        <div id="book-details-cover-slot"></div>
+        <h3 id="book-details-title" class="book-details-title">Book title</h3>
+        <p id="book-details-author" class="book-details-author">Author</p>
+        <div id="book-details-rating" class="book-details-rating hidden"></div>
+        <div class="book-details-grid">
+          <div class="book-details-item">
+            <span class="book-details-label">Status</span>
+            <span id="book-details-status" class="book-details-value">-</span>
+          </div>
+          <div class="book-details-item">
+            <span class="book-details-label">Format</span>
+            <span id="book-details-format" class="book-details-value">-</span>
+          </div>
+          <div class="book-details-item">
+            <span class="book-details-label">Ownership</span>
+            <span id="book-details-ownership" class="book-details-value">-</span>
+          </div>
+          <div class="book-details-item">
+            <span class="book-details-label">Added</span>
+            <span id="book-details-added" class="book-details-value">-</span>
+          </div>
+          <div class="book-details-item">
+            <span class="book-details-label">Series</span>
+            <span id="book-details-series" class="book-details-value">-</span>
+          </div>
+          <div class="book-details-item">
+            <span class="book-details-label">Progress</span>
+            <span id="book-details-progress" class="book-details-value">-</span>
+          </div>
+        </div>
+        <div class="book-details-tags-wrap">
+          <span class="book-details-label">Tags</span>
+          <div id="book-details-tags" class="book-details-tags"></div>
+        </div>
+      </div>
+      <footer class="book-details-footer">
+        <button type="button" class="btn btn-ghost" id="book-details-close-btn">Close</button>
+        <button type="button" class="btn btn-primary" id="book-details-edit-btn">Edit</button>
+      </footer>
+    </aside>
   </div>
 
   <!-- Want list item modal -->
@@ -371,6 +565,33 @@
           <span class="field-label">Author <abbr title="required">*</abbr></span>
           <input type="text" name="author" id="book-author" class="input" required autocomplete="off" />
         </label>
+        <label class="field">
+          <span class="field-label">ISBN</span>
+          <input type="text" name="isbn" id="book-isbn" class="input" placeholder="ISBN-10 or ISBN-13 (optional)" autocomplete="off" />
+        </label>
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">Cover</legend>
+          <div class="book-cover-picker">
+            <div class="book-cover-picker-preview-wrap">
+              <img id="book-cover-preview" class="book-cover-picker-preview hidden" alt="Selected cover preview" />
+              <div id="book-cover-preview-fallback" class="book-cover-picker-preview-fallback">No cover selected</div>
+            </div>
+            <div class="book-cover-picker-controls">
+              <button type="button" class="btn btn-ghost" id="btn-book-cover-find">Find cover options</button>
+              <button type="button" class="btn btn-ghost" id="btn-book-cover-reset-auto">Reset to auto</button>
+            </div>
+            <p id="book-cover-status" class="field-hint">Auto uses ISBN/title/author lookup.</p>
+            <div id="book-cover-candidates" class="book-cover-candidates hidden" aria-live="polite"></div>
+            <label class="field">
+              <span class="field-label">Custom cover URL</span>
+              <input type="url" id="book-cover-custom-url" class="input" placeholder="https://example.com/cover.jpg" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span class="field-label">Upload cover image</span>
+              <input type="file" id="book-cover-upload" class="input" accept="image/png,image/jpeg,image/webp,image/gif" />
+            </label>
+          </div>
+        </fieldset>
 
         <label class="field">
           <span class="field-label">Type</span>
@@ -390,6 +611,19 @@
           <span class="field-label">Reading status</span>
           <select name="readingStatus" id="book-reading-status" class="select"></select>
         </label>
+
+        <div id="book-progress-wrap" class="hidden">
+          <div class="field-row-split">
+            <label class="field">
+              <span class="field-label">Current page</span>
+              <input type="number" id="book-current-page" class="input" min="0" step="1" placeholder="e.g. 89" />
+            </label>
+            <label class="field">
+              <span class="field-label">Total pages</span>
+              <input type="number" id="book-total-pages" class="input" min="1" step="1" placeholder="e.g. 393" />
+            </label>
+          </div>
+        </div>
 
         <label class="field">
           <span class="field-label">Owned or borrowed</span>
@@ -544,6 +778,33 @@
         <footer class="modal-footer modal-footer--stack">
           <button type="button" class="btn btn-primary btn-block" id="btn-rate-save">Save</button>
           <button type="button" class="btn btn-ghost btn-block" id="btn-rate-skip">Skip for now</button>
+        </footer>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="modal-series-rate-overlay" aria-hidden="true">
+    <div class="modal modal--narrow" role="dialog" aria-modal="true" aria-labelledby="modal-series-rate-title">
+      <header class="modal-header">
+        <h2 id="modal-series-rate-title" class="modal-title">Rate this series</h2>
+        <button type="button" class="icon-btn" id="modal-series-rate-close" aria-label="Close">×</button>
+      </header>
+      <div class="modal-body">
+        <p class="rate-book-title" id="series-rate-label"></p>
+        <label class="field">
+          <span class="field-label">Completed on (override)</span>
+          <input type="date" id="series-rate-finished-date" class="input" />
+        </label>
+        <div class="rating-emoji-row" role="group" aria-label="Series rating">
+          <button type="button" class="rating-btn rating-btn--text" data-series-stars="1" aria-pressed="false">★☆☆☆☆</button>
+          <button type="button" class="rating-btn rating-btn--text" data-series-stars="2" aria-pressed="false">★★☆☆☆</button>
+          <button type="button" class="rating-btn rating-btn--text" data-series-stars="3" aria-pressed="false">★★★☆☆</button>
+          <button type="button" class="rating-btn rating-btn--text" data-series-stars="4" aria-pressed="false">★★★★☆</button>
+          <button type="button" class="rating-btn rating-btn--text" data-series-stars="5" aria-pressed="false">★★★★★</button>
+        </div>
+        <footer class="modal-footer modal-footer--stack">
+          <button type="button" class="btn btn-primary btn-block" id="btn-series-rate-save">Save rating</button>
+          <button type="button" class="btn btn-ghost btn-block" id="btn-series-rate-cancel">Cancel</button>
         </footer>
       </div>
     </div>
