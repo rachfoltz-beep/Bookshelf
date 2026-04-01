@@ -145,6 +145,15 @@
             </div>
           </div>
         </div>
+        <button type="button" class="status-colors-trigger header-status-colors hidden" id="btn-status-colors-header" aria-expanded="false" aria-controls="status-colors-popover">
+          <span class="status-colors-trigger-icon" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.75"/>
+              <path d="M12 16v-5M12 8h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </span>
+          Status colors
+        </button>
       </nav>
     </div>
   </header>
@@ -179,13 +188,18 @@
         <div class="app-content-rail" id="app-content-rail">
           <div id="pane-library" class="content-pane">
             <div id="library-dashboard-above-controls" class="library-dashboard-above-controls">
-              <h2 id="shelf-heading" class="panel-title shelf-panel-main-title">Your library</h2>
-              <p class="panel-intro shelf-panel-intro">Pick a <strong>shelf</strong> or <strong>status</strong> on the left to narrow your library. Each book has a reading status (to read, in progress, read, on hold, DNF). Add up to 25 custom shelves besides your default <strong>My Bookshelf</strong>.</p>
+              <h2 id="shelf-heading" class="panel-title shelf-panel-main-title">Dashboard</h2>
               <div class="dashboard-top-cards">
                 <section class="goals-main-summary" id="goals-main-summary" aria-label="Reading goals summary">
                   <div class="goals-main-summary-head">
                     <p class="goals-main-summary-kicker">Goals snapshot</p>
-                    <button type="button" class="btn-small goals-main-summary-btn" id="btn-goals-open">Manage goals</button>
+                    <div class="goals-main-summary-head-actions">
+                      <div class="goals-main-summary-nav hidden" id="goals-main-summary-nav" aria-label="Switch goal">
+                        <button type="button" class="icon-btn" id="goals-main-summary-prev" aria-label="Previous goal">←</button>
+                        <button type="button" class="icon-btn" id="goals-main-summary-next" aria-label="Next goal">→</button>
+                      </div>
+                      <button type="button" class="btn-small goals-main-summary-btn" id="btn-goals-open">Manage goals</button>
+                    </div>
                   </div>
                   <div class="goals-main-summary-grid" id="goals-main-summary-grid">
                     <p class="goals-main-summary-empty">No goals set yet.</p>
@@ -216,15 +230,6 @@
                 </span>
                 <h2 class="panel-title library-minimal-title" id="library-minimal-title">Reading</h2>
               </div>
-              <button type="button" class="status-colors-trigger" id="btn-status-colors-minimal" aria-expanded="false" aria-controls="status-colors-popover">
-                <span class="status-colors-trigger-icon" aria-hidden="true">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.75"/>
-                    <path d="M12 16v-5M12 8h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                  </svg>
-                </span>
-                Status colors
-              </button>
             </div>
 
             <div class="library-controls" id="library-controls">
@@ -277,15 +282,6 @@
                   </div>
                 </div>
                 <div class="library-toolbar-meta">
-                  <button type="button" class="status-colors-trigger library-status-colors--full" id="btn-status-colors-full" aria-expanded="false" aria-controls="status-colors-popover">
-                    <span class="status-colors-trigger-icon" aria-hidden="true">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.75"/>
-                        <path d="M12 16v-5M12 8h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                      </svg>
-                    </span>
-                    Status colors
-                  </button>
                   <p class="library-book-count" id="book-list-count" aria-live="polite">0 books</p>
                 </div>
               </div>
@@ -494,14 +490,20 @@
       </header>
       <form id="form-want" class="modal-body">
         <input type="hidden" id="want-item-id" value="" />
-        <label class="field">
+        <div class="field">
           <span class="field-label">Title <abbr title="required">*</abbr></span>
-          <input type="text" id="want-title" class="input" required autocomplete="off" />
-        </label>
-        <label class="field">
+          <div class="tags-input-wrap">
+            <input type="text" id="want-title" class="input" required autocomplete="off" aria-autocomplete="list" aria-controls="want-title-suggestions" />
+            <ul id="want-title-suggestions" class="tags-suggestions hidden" role="listbox" aria-label="Title suggestions from Open Library"></ul>
+          </div>
+        </div>
+        <div class="field">
           <span class="field-label">Author</span>
-          <input type="text" id="want-author" class="input" placeholder="Optional" autocomplete="off" />
-        </label>
+          <div class="tags-input-wrap">
+            <input type="text" id="want-author" class="input" placeholder="Optional" autocomplete="off" aria-autocomplete="list" aria-controls="want-author-suggestions" />
+            <ul id="want-author-suggestions" class="tags-suggestions hidden" role="listbox" aria-label="Author suggestions from Open Library"></ul>
+          </div>
+        </div>
         <label class="field">
           <span class="field-label">Notes</span>
           <textarea id="want-notes" class="input input-textarea" rows="2" placeholder="Why it caught your eye, edition, links…"></textarea>
@@ -557,14 +559,20 @@
       <form id="form-book" class="modal-body">
         <input type="hidden" name="id" id="book-id" />
 
-        <label class="field">
+        <div class="field">
           <span class="field-label">Title <abbr title="required">*</abbr></span>
-          <input type="text" name="title" id="book-title" class="input" required autocomplete="off" />
-        </label>
-        <label class="field">
+          <div class="tags-input-wrap">
+            <input type="text" name="title" id="book-title" class="input" required autocomplete="off" aria-autocomplete="list" aria-controls="book-title-suggestions" />
+            <ul id="book-title-suggestions" class="tags-suggestions hidden" role="listbox" aria-label="Title suggestions from Open Library"></ul>
+          </div>
+        </div>
+        <div class="field">
           <span class="field-label">Author <abbr title="required">*</abbr></span>
-          <input type="text" name="author" id="book-author" class="input" required autocomplete="off" />
-        </label>
+          <div class="tags-input-wrap">
+            <input type="text" name="author" id="book-author" class="input" required autocomplete="off" aria-autocomplete="list" aria-controls="book-author-suggestions" />
+            <ul id="book-author-suggestions" class="tags-suggestions hidden" role="listbox" aria-label="Author suggestions from Open Library"></ul>
+          </div>
+        </div>
         <label class="field">
           <span class="field-label">ISBN</span>
           <input type="text" name="isbn" id="book-isbn" class="input" placeholder="ISBN-10 or ISBN-13 (optional)" autocomplete="off" />
@@ -665,11 +673,14 @@
             <span>This book is part of a series</span>
           </label>
           <div id="series-fields" class="series-fields hidden">
-            <label class="field">
+            <div class="field">
               <span class="field-label">Series name</span>
-              <input type="text" id="book-series-name" class="input" placeholder="e.g. The Expanse" autocomplete="off" list="series-name-options" />
-              <datalist id="series-name-options"></datalist>
-            </label>
+              <p class="field-hint field-hint--modal">Series you have already added appear here as you type.</p>
+              <div class="tags-input-wrap">
+                <input type="text" id="book-series-name" class="input" placeholder="e.g. The Expanse" autocomplete="off" aria-autocomplete="list" aria-controls="book-series-suggestions" />
+                <ul id="book-series-suggestions" class="tags-suggestions hidden" role="listbox" aria-label="Series name suggestions"></ul>
+              </div>
+            </div>
             <div class="field-row-split">
               <label class="field">
                 <span class="field-label">Volume #</span>

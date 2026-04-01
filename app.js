@@ -2,7 +2,20 @@
  * My Cozy Library — local-first reading tracker
  */
 
-const STORAGE_KEY = "book_shelf_data_v1";
+/** Legacy single-key storage (pre–per-account cache). Only used for one-time “attach to this login?” prompt. */
+const STORAGE_KEY_LEGACY = "book_shelf_data_v1";
+/** Signed-out / pre-auth browser cache (never shared across Supabase users). */
+const STORAGE_KEY_GUEST = "book_shelf_data_v1__guest";
+
+function libraryUserStorageKey(userId) {
+  const u = String(userId || "").trim();
+  if (!isUuidString(u)) return STORAGE_KEY_GUEST;
+  return `${STORAGE_KEY_LEGACY}__user__${u}`;
+}
+
+function legacyAttachSkipStorageKey(userId) {
+  return `book_shelf_legacy_skip__${String(userId || "").trim()}`;
+}
 const THEME_KEY = "book_shelf_theme";
 /** Set localStorage to "1" to show on-card cover lookup debug pills: cozy_library_cover_debug */
 const COVER_DEBUG_LS_KEY = "cozy_library_cover_debug";
@@ -36,6 +49,12 @@ const READING_STATUSES = [
 ];
 
 const READING_STATUS_IDS = READING_STATUSES.map((s) => s.id);
+
+/** Values allowed by public.books.type check constraint. */
+const BOOK_MEDIA_TYPES = ["physical", "ebook", "audiobook"];
+
+/** Values allowed by public.books.rating check constraint. */
+const BOOK_RATING_DB_VALUES = ["terrible", "not_good", "okay", "good", "great"];
 
 /** Sidebar order under "All books" (matches cozy nav mock). */
 const SIDEBAR_READING_STATUS_ORDER = ["in_progress", "wishlist", "read", "on_hold", "dnf"];
@@ -514,6 +533,311 @@ async function lookupIsbnByTitleAuthor(title, author) {
     openLibraryIsbnLookupCache.set(key, "");
   }
   return { isbn: "", lookupError: hadLookupError };
+}
+
+const OPEN_LIB_SUGGEST_MIN_LEN = 2;
+const OPEN_LIB_SUGGEST_DEBOUNCE_MS = 300;
+
+function authorLineFromOpenLibraryDoc(doc) {
+  const an = doc?.author_name;
+  if (Array.isArray(an)) {
+    return an
+      .map((x) => String(x || "").trim())
+      .filter(Boolean)
+      .join(", ");
+  }
+  return String(an || "").trim();
+}
+
+function parseOpenLibraryJsonResponse(resp) {
+  if (!resp.ok) return null;
+  return resp.json().catch(() => null);
+}
+
+async function fetchOpenLibrarySearchDocs(query, limit, signal) {
+  const q = String(query || "").trim();
+  if (!q) return [];
+  const enc = encodeURIComponent(q);
+  const urls = [
+    `https://openlibrary.org/search.json?q=${enc}&limit=${limit}`,
+    `https://openlibrary.org/search.json?q=${encodeURIComponent(`title:${q}`)}&limit=${limit}`,
+    `https://openlibrary.org/search.json?q=${encodeURIComponent(`title:${q}*`)}&limit=${limit}`,
+    `https://openlibrary.org/search.json?title=${enc}&limit=${limit}`,
+    `https://openlibrary.org/search.json?q=${encodeURIComponent(`${q}*`)}&limit=${limit}`,
+    `https://openlibrary.org/search.json?q=${enc}&limit=${limit}&fields=key,title,author_name`,
+  ];
+  for (const url of urls) {
+    const resp = await fetch(url, { signal });
+    const data = await parseOpenLibraryJsonResponse(resp);
+    const docs = Array.isArray(data?.docs) ? data.docs : [];
+    if (docs.length) return docs;
+  }
+  return [];
+}
+
+const OPEN_LIB_TITLE_SUGGEST_FETCH = 40;
+
+/** Split title into tokens for matching (letters/digits incl. common Latin ext). */
+function splitTitleWordsForAutocomplete(title) {
+  return String(title || "")
+    .toLowerCase()
+    .split(/[^a-z0-9\u00c0-\u024f\u1e00-\u1eff]+/i)
+    .filter((w) => w.length > 0);
+}
+
+/**
+ * Higher score = better match for partial typing. Prefix-in-long-word (e.g. kind → kindred)
+ * ranks above unrelated titles where the query is only a whole word (e.g. German "Kind").
+ */
+function scoreTitleForAutocomplete(title, author, queryRaw) {
+  const q = String(queryRaw || "").trim().toLowerCase();
+  const t = String(title || "").trim().toLowerCase();
+  const a = String(author || "").trim().toLowerCase();
+  if (!q || !t) return 0;
+
+  let score = 0;
+  if (t === q) score = 100000;
+  else if (t.startsWith(q)) score = 96500;
+
+  let wordBest = 0;
+  for (const w of splitTitleWordsForAutocomplete(t)) {
+    if (w === q) wordBest = Math.max(wordBest, 88000);
+    else if (w.startsWith(q) && w.length > q.length) wordBest = Math.max(wordBest, 95500);
+    else if (w.startsWith(q)) wordBest = Math.max(wordBest, 90000);
+    else if (q.length >= 3 && w.includes(q)) wordBest = Math.max(wordBest, 5000);
+  }
+  if (wordBest > score) score = wordBest;
+
+  if (score < 15000 && t.includes(q)) {
+    score = 12000;
+    if (t.length > 120) score -= 5000;
+    else if (t.length > 80) score -= 2500;
+  }
+
+  if (a.includes(q)) score += 800;
+  return score;
+}
+
+async function fetchOpenLibraryTitleSuggestions(query, signal) {
+  const q = String(query || "").trim();
+  if (q.length < OPEN_LIB_SUGGEST_MIN_LEN) return [];
+  const docs = await fetchOpenLibrarySearchDocs(q, OPEN_LIB_TITLE_SUGGEST_FETCH, signal);
+  const seen = new Set();
+  const rows = [];
+  for (const doc of docs) {
+    const title = String(doc?.title || "").trim();
+    if (!title) continue;
+    const author = authorLineFromOpenLibraryDoc(doc);
+    const key = `${title.toLowerCase()}|${author.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({ title, author });
+  }
+  rows.sort((x, y) => {
+    const d = scoreTitleForAutocomplete(y.title, y.author, q) - scoreTitleForAutocomplete(x.title, x.author, q);
+    if (d !== 0) return d;
+    return x.title.length - y.title.length;
+  });
+  return rows.slice(0, 12);
+}
+
+async function fetchOpenLibraryAuthorSuggestions(query, signal) {
+  const q = String(query || "").trim();
+  if (q.length < OPEN_LIB_SUGGEST_MIN_LEN) return [];
+  const qLower = q.toLowerCase();
+
+  const resp = await fetch(
+    `https://openlibrary.org/search/authors.json?q=${encodeURIComponent(q)}&limit=12`,
+    { signal }
+  );
+  const authorData = await parseOpenLibraryJsonResponse(resp);
+  const authorDocs = Array.isArray(authorData?.docs) ? authorData.docs : [];
+  const fromAuthors = [];
+  const seenA = new Set();
+  for (const d of authorDocs) {
+    const name = String(d?.name || "").trim();
+    if (!name) continue;
+    const k = name.toLowerCase();
+    if (seenA.has(k)) continue;
+    seenA.add(k);
+    fromAuthors.push(name);
+    if (fromAuthors.length >= 12) return fromAuthors;
+  }
+  if (fromAuthors.length) return fromAuthors;
+
+  const workDocs = await fetchOpenLibrarySearchDocs(q, 24, signal);
+  const rows = [];
+  const seenW = new Set();
+  for (const doc of workDocs) {
+    const authors = doc?.author_name;
+    const list = Array.isArray(authors) ? authors : typeof authors === "string" ? [authors] : [];
+    for (const a of list) {
+      const name = String(a || "").trim();
+      if (!name) continue;
+      const k = name.toLowerCase();
+      if (seenW.has(k)) continue;
+      seenW.add(k);
+      rows.push({ name, pref: k.includes(qLower) ? 0 : 1 });
+    }
+  }
+  rows.sort((x, y) => x.pref - y.pref || x.name.localeCompare(y.name));
+  return rows.slice(0, 12).map((r) => r.name);
+}
+
+const OPEN_LIB_SUGGEST_CACHE_MAX = 48;
+let openLibraryTitleSuggestCache = [];
+let openLibraryAuthorSuggestCache = [];
+/** Last trimmed values per field — used to drop stale Open Library cache when the user deletes or replaces text. */
+let olSnapBookTitle = "";
+let olSnapBookAuthor = "";
+let olSnapWantTitle = "";
+let olSnapWantAuthor = "";
+
+function shouldResetOlSuggestCache(prev, q) {
+  const p = String(prev || "").trim();
+  const s = String(q || "").trim();
+  if (s.length < p.length) return true;
+  const pl = p.toLowerCase();
+  const sl = s.toLowerCase();
+  if (pl.length > 0 && sl.length > 0 && !sl.startsWith(pl) && !pl.startsWith(sl)) return true;
+  return false;
+}
+
+function clearOpenLibrarySuggestCaches() {
+  openLibraryTitleSuggestCache = [];
+  openLibraryAuthorSuggestCache = [];
+  olSnapBookTitle = "";
+  olSnapBookAuthor = "";
+  olSnapWantTitle = "";
+  olSnapWantAuthor = "";
+}
+
+function mergeTitleRowsIntoCache(rows) {
+  if (!rows?.length) return;
+  const seen = new Set(
+    openLibraryTitleSuggestCache.map(
+      (r) => `${String(r.title || "").toLowerCase()}|${String(r.author || "").toLowerCase()}`
+    )
+  );
+  for (const r of rows) {
+    const title = String(r.title || "").trim();
+    if (!title) continue;
+    const author = String(r.author || "").trim();
+    const k = `${title.toLowerCase()}|${author.toLowerCase()}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    openLibraryTitleSuggestCache.push({ title, author });
+  }
+  if (openLibraryTitleSuggestCache.length > OPEN_LIB_SUGGEST_CACHE_MAX) {
+    openLibraryTitleSuggestCache = openLibraryTitleSuggestCache.slice(-OPEN_LIB_SUGGEST_CACHE_MAX);
+  }
+}
+
+function mergeAuthorNamesIntoCache(names) {
+  if (!names?.length) return;
+  const seen = new Set(openLibraryAuthorSuggestCache.map((n) => String(n || "").toLowerCase()));
+  for (const n of names) {
+    const name = String(n || "").trim();
+    if (!name) continue;
+    const k = name.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    openLibraryAuthorSuggestCache.push(name);
+  }
+  if (openLibraryAuthorSuggestCache.length > OPEN_LIB_SUGGEST_CACHE_MAX) {
+    openLibraryAuthorSuggestCache = openLibraryAuthorSuggestCache.slice(-OPEN_LIB_SUGGEST_CACHE_MAX);
+  }
+}
+
+function filterTitleRowsByQuery(rows, q) {
+  const qTrim = String(q || "").trim();
+  const qLower = qTrim.toLowerCase();
+  if (qLower.length < OPEN_LIB_SUGGEST_MIN_LEN) return [];
+  const out = [];
+  const seen = new Set();
+  for (const r of rows) {
+    const title = String(r.title || "").trim();
+    const author = String(r.author || "").trim();
+    if (!title) continue;
+    const t = title.toLowerCase();
+    const a = author.toLowerCase();
+    if (!t.includes(qLower) && !a.includes(qLower)) continue;
+    const k = `${t}|${a}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ title, author });
+  }
+  out.sort((x, y) => {
+    const d = scoreTitleForAutocomplete(y.title, y.author, qTrim) - scoreTitleForAutocomplete(x.title, x.author, qTrim);
+    if (d !== 0) return d;
+    return x.title.length - y.title.length;
+  });
+  return out.slice(0, 12);
+}
+
+function filterAuthorNamesByQuery(cache, q) {
+  const qLower = String(q || "").trim().toLowerCase();
+  if (qLower.length < OPEN_LIB_SUGGEST_MIN_LEN) return [];
+  const out = [];
+  const seen = new Set();
+  for (const name of cache) {
+    const n = String(name || "").trim();
+    if (!n) continue;
+    const nl = n.toLowerCase();
+    if (!nl.includes(qLower)) continue;
+    if (seen.has(nl)) continue;
+    seen.add(nl);
+    out.push(n);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function renderTitleSuggestionUl(ulEl, items) {
+  if (!ulEl) return;
+  ulEl.innerHTML = "";
+  if (!items.length) {
+    ulEl.classList.add("hidden");
+    return;
+  }
+  for (const row of items) {
+    const li = document.createElement("li");
+    li.className = "tags-suggestion-item";
+    li.setAttribute("role", "presentation");
+    const pick = document.createElement("button");
+    pick.type = "button";
+    pick.className = "tags-suggestion-pick";
+    pick.setAttribute("role", "option");
+    pick.textContent = row.author ? `${row.title} — ${row.author}` : row.title;
+    pick.dataset.title = row.title;
+    pick.dataset.author = row.author || "";
+    li.appendChild(pick);
+    ulEl.appendChild(li);
+  }
+  ulEl.classList.remove("hidden");
+}
+
+function renderAuthorSuggestionUl(ulEl, names) {
+  if (!ulEl) return;
+  ulEl.innerHTML = "";
+  if (!names.length) {
+    ulEl.classList.add("hidden");
+    return;
+  }
+  for (const name of names) {
+    const li = document.createElement("li");
+    li.className = "tags-suggestion-item";
+    li.setAttribute("role", "presentation");
+    const pick = document.createElement("button");
+    pick.type = "button";
+    pick.className = "tags-suggestion-pick";
+    pick.setAttribute("role", "option");
+    pick.textContent = name;
+    pick.dataset.authorName = name;
+    li.appendChild(pick);
+    ulEl.appendChild(li);
+  }
+  ulEl.classList.remove("hidden");
 }
 
 async function lookupCoverUrlByTitleAuthor(book, size = "M") {
@@ -1022,9 +1346,9 @@ function normalizeWantItem(w) {
   };
 }
 
-function loadState() {
+function loadStateFromStorageKey(storageKey) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey);
     if (raw) {
       const data = JSON.parse(raw);
       const gh = Array.isArray(data.goalsHistory)
@@ -1067,6 +1391,11 @@ function loadState() {
   return empty;
 }
 
+/** Cache used while signed out (auth gate). Never substitute another user’s library. */
+function loadGuestState() {
+  return loadStateFromStorageKey(STORAGE_KEY_GUEST);
+}
+
 function loadStateFromObject(data) {
   const gh = Array.isArray(data?.goalsHistory)
     ? data.goalsHistory.filter((h) => h && h.period && h.periodKey)
@@ -1095,19 +1424,22 @@ function loadStateFromObject(data) {
 }
 
 function saveState(state) {
-  localStorage.setItem(
-    STORAGE_KEY,
-    JSON.stringify({
-      books: state.books,
-      series: state.series,
-      userShelves: state.userShelves || [],
-      goals: state.goals,
-      goalsHistory: state.goalsHistory || [],
-      hiddenTagSuggestions: state.hiddenTagSuggestions || [],
-      wantList: state.wantList || [],
-      hiddenSeriesIds: state.hiddenSeriesIds || [],
-    })
-  );
+  const key = sbUserId ? libraryUserStorageKey(sbUserId) : STORAGE_KEY_GUEST;
+  try {
+    localStorage.setItem(
+      key,
+      JSON.stringify({
+        books: state.books,
+        series: state.series,
+        userShelves: state.userShelves || [],
+        goals: state.goals,
+        goalsHistory: state.goalsHistory || [],
+        hiddenTagSuggestions: state.hiddenTagSuggestions || [],
+        wantList: state.wantList || [],
+        hiddenSeriesIds: state.hiddenSeriesIds || [],
+      })
+    );
+  } catch (_) {}
 }
 
 function startOfWeekMonday(d) {
@@ -1426,6 +1758,23 @@ function getMatchingTagSuggestions(state, partial) {
   return out.slice(0, 14);
 }
 
+function getMatchingSeriesNames(state, partial) {
+  const p = (partial || "").trim().toLowerCase();
+  const seen = new Set();
+  const names = [];
+  for (const s of state.series || []) {
+    const name = String(s?.name || "").trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    if (p && !key.startsWith(p) && !key.includes(p)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  return names.slice(0, 14);
+}
+
 function findOrCreateSeries(seriesList, name, opts) {
   const trimmed = (name || "").trim();
   if (!trimmed) return null;
@@ -1596,8 +1945,7 @@ const els = {
   libraryControls: document.getElementById("library-controls"),
   libraryBooksStack: document.getElementById("library-books-stack"),
   libraryWantStack: document.getElementById("library-want-stack"),
-  btnStatusColorsFull: document.getElementById("btn-status-colors-full"),
-  btnStatusColorsMinimal: document.getElementById("btn-status-colors-minimal"),
+  btnStatusColorsHeader: document.getElementById("btn-status-colors-header"),
   statusColorsPopover: document.getElementById("status-colors-popover"),
   sidebarMyLibrary: document.getElementById("sidebar-my-library"),
   sidebarShelves: document.getElementById("sidebar-shelves"),
@@ -1652,6 +2000,9 @@ const els = {
   btnExportReminder: document.getElementById("btn-export-reminder"),
   btnDismissExportReminder: document.getElementById("btn-dismiss-export-reminder"),
   goalsMainSummaryGrid: document.getElementById("goals-main-summary-grid"),
+  goalsMainSummaryNav: document.getElementById("goals-main-summary-nav"),
+  goalsMainSummaryPrev: document.getElementById("goals-main-summary-prev"),
+  goalsMainSummaryNext: document.getElementById("goals-main-summary-next"),
   btnGoalsOpen: document.getElementById("btn-goals-open"),
   goalsEmpty: document.getElementById("goals-empty"),
   goalsListWrap: document.getElementById("goals-list-wrap"),
@@ -1684,6 +2035,8 @@ const els = {
   wantItemId: document.getElementById("want-item-id"),
   wantTitle: document.getElementById("want-title"),
   wantAuthor: document.getElementById("want-author"),
+  wantTitleSuggestions: document.getElementById("want-title-suggestions"),
+  wantAuthorSuggestions: document.getElementById("want-author-suggestions"),
   wantNotes: document.getElementById("want-notes"),
   wantTags: document.getElementById("want-tags"),
   wantTagsSuggestions: document.getElementById("want-tags-suggestions"),
@@ -1736,7 +2089,9 @@ const els = {
   bookIsSeries: document.getElementById("book-is-series"),
   seriesFields: document.getElementById("series-fields"),
   bookSeriesName: document.getElementById("book-series-name"),
-  seriesNameOptions: document.getElementById("series-name-options"),
+  bookTitleSuggestions: document.getElementById("book-title-suggestions"),
+  bookAuthorSuggestions: document.getElementById("book-author-suggestions"),
+  bookSeriesSuggestions: document.getElementById("book-series-suggestions"),
   bookSeriesVol: document.getElementById("book-series-vol"),
   bookSeriesTotal: document.getElementById("book-series-total"),
   bookSeriesIncomplete: document.getElementById("book-series-incomplete"),
@@ -1772,8 +2127,10 @@ const els = {
   bookDetailsTags: document.getElementById("book-details-tags"),
 };
 
-let state = loadState();
+let state = loadGuestState();
 let currentlyReadingPage = 0;
+/** Index into sorted goals for the dashboard Goals snapshot card (when multiple goals). */
+let goalsMainSummaryPage = 0;
 let seriesFilterValue = "all";
 let seriesSortValue = "name_asc";
 let seriesTabValue = "active";
@@ -1799,6 +2156,21 @@ let pendingRateBookId = null;
 let selectedRating = null;
 let tagSuggestBlurTimer = null;
 let wantTagSuggestBlurTimer = null;
+
+let bookTitleSuggestTimer = null;
+let bookTitleSuggestAbort = null;
+let bookTitleSuggestBlurTimer = null;
+let bookAuthorSuggestTimer = null;
+let bookAuthorSuggestAbort = null;
+let bookAuthorSuggestBlurTimer = null;
+let bookSeriesSuggestBlurTimer = null;
+
+let wantTitleSuggestTimer = null;
+let wantTitleSuggestAbort = null;
+let wantTitleSuggestBlurTimer = null;
+let wantAuthorSuggestTimer = null;
+let wantAuthorSuggestAbort = null;
+let wantAuthorSuggestBlurTimer = null;
 let pendingWantListAdoptId = null;
 let pendingSeriesHideId = null;
 let modalCoverCandidates = [];
@@ -2024,24 +2396,30 @@ function mapStateToSupabasePayload(userId, s) {
     let sid = resolveShelfId(b.userShelfId);
     if (sid && !userShelfIds.has(sid)) sid = null;
     const userShelfKey = sid || (defaultShelfId && userShelfIds.has(defaultShelfId) ? defaultShelfId : null);
+    const mediaType = String(b.type || "").trim();
+    const type = BOOK_MEDIA_TYPES.includes(mediaType) ? mediaType : "physical";
+    const rs = readingStatusOf(b);
+    const reading_status = READING_STATUS_IDS.includes(rs) ? rs : "wishlist";
+    let ratingOut = b.rating ?? null;
+    if (ratingOut && !BOOK_RATING_DB_VALUES.includes(ratingOut)) ratingOut = null;
     return {
       id: b.id,
       user_id: userId,
       title: b.title || "",
       author: b.author || "",
-      type: b.type || "physical",
+      type,
       isbn: b.isbn,
       cover_preference: b.coverPreference || "auto",
       cover_url: b.coverUrl || "",
       cover_meta: b.coverMeta ?? null,
       user_shelf_id: userShelfKey && userShelfIds.has(userShelfKey) ? userShelfKey : null,
-      reading_status: readingStatusOf(b),
-      ownership: b.ownership || "owned",
+      reading_status,
+      ownership: b.ownership === "borrowed" ? "borrowed" : "owned",
       tags: b.tags || [],
       recommended_by: b.recommendedBy || "",
       series_id: b.seriesId && seriesIds.has(b.seriesId) ? b.seriesId : null,
       volume_in_series: b.volumeInSeries ?? null,
-      rating: b.rating || null,
+      rating: ratingOut,
       favorite: !!b.favorite,
       read_at: b.readAt || null,
       read_date_unknown: !!b.readDateUnknown,
@@ -2211,6 +2589,21 @@ function describeLoadError(err) {
   return s || "Unknown error.";
 }
 
+/** Short hint when API errors mention missing columns (migrations not applied / stale cache). */
+function schemaDriftUserHint(text) {
+  const t = String(text || "").toLowerCase();
+  if (
+    (t.includes("current_page") || t.includes("total_pages")) &&
+    (t.includes("schema cache") || t.includes("could not find") || t.includes("column"))
+  ) {
+    return " Run `supabase.migrate_books_page_progress.sql` in Supabase → SQL Editor (then wait a few seconds and retry).";
+  }
+  if (t.includes("books_reading_status_check") || (t.includes("reading_status") && t.includes("check constraint"))) {
+    return " Run `supabase.migrate_books_reading_status_constraint.sql` in Supabase → SQL Editor (updates allowed statuses, including on hold).";
+  }
+  return "";
+}
+
 async function loadStateFromSupabase(userId) {
   const uid = String(userId || "").trim();
   if (!isUuidString(uid)) {
@@ -2300,8 +2693,12 @@ function scheduleCloudSync() {
       setAuthStatus(`Signed in. Synced ${new Date().toLocaleTimeString()}.`, false);
     } catch (err) {
       console.error("Cloud sync failed:", err);
-      const detail = err?.message || err?.details || "";
-      setAuthStatus(detail ? `Cloud sync failed: ${detail}` : "Signed in, but cloud sync failed.", true);
+      const detail = describeLoadError(err);
+      const drift = schemaDriftUserHint(detail);
+      setAuthStatus(
+        detail ? `Cloud sync failed: ${detail}${drift}` : "Signed in, but cloud sync failed.",
+        true
+      );
     }
   }, 700);
 }
@@ -2331,7 +2728,7 @@ async function runHandleSession(session) {
   sbUserId = incomingUid || null;
   if (!sbUserId) {
     cloudHydratedAccessToken = null;
-    state = loadState();
+    state = loadGuestState();
     if (!state.goalsHistory) state.goalsHistory = [];
     if (!state.hiddenTagSuggestions) state.hiddenTagSuggestions = [];
     if (!state.wantList) state.wantList = [];
@@ -2383,13 +2780,33 @@ async function runHandleSession(session) {
     }
     sbUserId = cloudUserId;
 
-    // Always re-read localStorage so we don’t use a stale in-memory `state`, and compare
-    // “library” rows only. Cloud can have goals/history/settings while books are still empty;
-    // treating that as “non-empty cloud” used to replace local books and persist an empty list.
-    const localSnapshot = JSON.parse(JSON.stringify(loadState()));
-    const cloudState = await loadStateFromSupabase(cloudUserId);
+    // Per-user local cache only — never reuse another account’s browser data from a shared key.
+    let localSnapshot = JSON.parse(JSON.stringify(loadStateFromStorageKey(libraryUserStorageKey(cloudUserId))));
+
     const migratedKey = migrationKeyForUser(cloudUserId);
     const hasMigrated = localStorage.getItem(migratedKey) === "1";
+    const skippedLegacy = localStorage.getItem(legacyAttachSkipStorageKey(cloudUserId)) === "1";
+    if (!libraryHasContent(localSnapshot) && !skippedLegacy && !hasMigrated) {
+      const fromLegacy = loadStateFromStorageKey(STORAGE_KEY_LEGACY);
+      if (libraryHasContent(fromLegacy)) {
+        const email = sbSession?.user?.email ? ` (${sbSession.user.email})` : "";
+        const ok = confirm(
+          `This browser still has a library from older storage (before per-account cache). Import it into this account${email}? Choose Cancel if this is a new account or a shared computer.`
+        );
+        if (ok) {
+          localSnapshot = JSON.parse(JSON.stringify(fromLegacy));
+          try {
+            localStorage.removeItem(STORAGE_KEY_LEGACY);
+          } catch (_) {}
+        } else {
+          try {
+            localStorage.setItem(legacyAttachSkipStorageKey(cloudUserId), "1");
+          } catch (_) {}
+        }
+      }
+    }
+
+    const cloudState = await loadStateFromSupabase(cloudUserId);
     const cloudLibraryEmpty = !libraryHasContent(cloudState);
     const localLibraryHasData = libraryHasContent(localSnapshot);
     if (cloudLibraryEmpty && localLibraryHasData) {
@@ -2414,15 +2831,17 @@ async function runHandleSession(session) {
     activeUserShelfId = getDefaultShelfId(state) || null;
     showWantListInLibrary = false;
     if (state.theme) applyTheme(state.theme);
+    saveState(state);
     renderAll();
     setAuthStatus(`Signed in as ${sbSession.user.email || "user"}.`, false);
     cloudHydratedAccessToken = sbSession?.access_token ?? null;
   } catch (err) {
     console.error("Cloud load failed:", err);
     const detail = describeLoadError(err);
+    const drift = schemaDriftUserHint(detail);
     setAuthStatus(
       detail
-        ? `Couldn’t load cloud data: ${detail}`
+        ? `Couldn’t load cloud data: ${detail}${drift}`
         : "Signed in, but failed loading cloud data. Check the browser console and your Supabase project (tables + RLS).",
       true
     );
@@ -2632,22 +3051,373 @@ function renderWantTagSuggestionsPanel() {
   els.wantTagsSuggestions.classList.remove("hidden");
 }
 
-function renderSeriesNameSuggestions() {
-  if (!els.seriesNameOptions) return;
-  const seen = new Set();
-  const names = [];
-  for (const s of state.series || []) {
-    const name = String(s?.name || "").trim();
-    if (!name) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    names.push(name);
+function hideBookTitleSuggestionsPanel() {
+  clearTimeout(bookTitleSuggestTimer);
+  bookTitleSuggestTimer = null;
+  if (bookTitleSuggestAbort) {
+    bookTitleSuggestAbort.abort();
+    bookTitleSuggestAbort = null;
   }
-  names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-  els.seriesNameOptions.innerHTML = names
-    .map((name) => `<option value="${name.replace(/"/g, "&quot;")}"></option>`)
-    .join("");
+  clearTimeout(bookTitleSuggestBlurTimer);
+  bookTitleSuggestBlurTimer = null;
+  if (els.bookTitleSuggestions) {
+    els.bookTitleSuggestions.classList.add("hidden");
+    els.bookTitleSuggestions.innerHTML = "";
+  }
+}
+
+function hideBookAuthorSuggestionsPanel() {
+  clearTimeout(bookAuthorSuggestTimer);
+  bookAuthorSuggestTimer = null;
+  if (bookAuthorSuggestAbort) {
+    bookAuthorSuggestAbort.abort();
+    bookAuthorSuggestAbort = null;
+  }
+  clearTimeout(bookAuthorSuggestBlurTimer);
+  bookAuthorSuggestBlurTimer = null;
+  if (els.bookAuthorSuggestions) {
+    els.bookAuthorSuggestions.classList.add("hidden");
+    els.bookAuthorSuggestions.innerHTML = "";
+  }
+}
+
+function hideBookSeriesSuggestionsPanel() {
+  clearTimeout(bookSeriesSuggestBlurTimer);
+  bookSeriesSuggestBlurTimer = null;
+  if (els.bookSeriesSuggestions) {
+    els.bookSeriesSuggestions.classList.add("hidden");
+    els.bookSeriesSuggestions.innerHTML = "";
+  }
+}
+
+function hideBookFieldAutocompletePanels() {
+  hideBookTitleSuggestionsPanel();
+  hideBookAuthorSuggestionsPanel();
+  hideBookSeriesSuggestionsPanel();
+}
+
+function hideWantTitleSuggestionsPanel() {
+  clearTimeout(wantTitleSuggestTimer);
+  wantTitleSuggestTimer = null;
+  if (wantTitleSuggestAbort) {
+    wantTitleSuggestAbort.abort();
+    wantTitleSuggestAbort = null;
+  }
+  clearTimeout(wantTitleSuggestBlurTimer);
+  wantTitleSuggestBlurTimer = null;
+  if (els.wantTitleSuggestions) {
+    els.wantTitleSuggestions.classList.add("hidden");
+    els.wantTitleSuggestions.innerHTML = "";
+  }
+}
+
+function hideWantAuthorSuggestionsPanel() {
+  clearTimeout(wantAuthorSuggestTimer);
+  wantAuthorSuggestTimer = null;
+  if (wantAuthorSuggestAbort) {
+    wantAuthorSuggestAbort.abort();
+    wantAuthorSuggestAbort = null;
+  }
+  clearTimeout(wantAuthorSuggestBlurTimer);
+  wantAuthorSuggestBlurTimer = null;
+  if (els.wantAuthorSuggestions) {
+    els.wantAuthorSuggestions.classList.add("hidden");
+    els.wantAuthorSuggestions.innerHTML = "";
+  }
+}
+
+function hideWantTitleAuthorAutocompletePanels() {
+  hideWantTitleSuggestionsPanel();
+  hideWantAuthorSuggestionsPanel();
+}
+
+async function runBookTitleSuggestionFetch() {
+  if (!els.bookTitle || !els.bookTitleSuggestions) return;
+  if (els.modalBookOverlay.classList.contains("hidden")) return;
+  const q = els.bookTitle.value.trim();
+  if (q.length < OPEN_LIB_SUGGEST_MIN_LEN) {
+    hideBookTitleSuggestionsPanel();
+    return;
+  }
+  if (bookTitleSuggestAbort) bookTitleSuggestAbort.abort();
+  const ac = new AbortController();
+  bookTitleSuggestAbort = ac;
+  let items = [];
+  try {
+    items = await fetchOpenLibraryTitleSuggestions(q, ac.signal);
+  } catch (e) {
+    if (e?.name === "AbortError") return;
+    items = [];
+  }
+  if (bookTitleSuggestAbort !== ac) return;
+  bookTitleSuggestAbort = null;
+  if (els.modalBookOverlay.classList.contains("hidden")) return;
+  const qNow = els.bookTitle.value.trim();
+  if (qNow.length < OPEN_LIB_SUGGEST_MIN_LEN) {
+    hideBookTitleSuggestionsPanel();
+    return;
+  }
+  const qLower = q.toLowerCase();
+  const qNowLower = qNow.toLowerCase();
+  const fetchStillApplies =
+    qNowLower === qLower ||
+    (qNowLower.startsWith(qLower) && qNowLower.length >= qLower.length);
+  if (items.length && fetchStillApplies) {
+    const ql = qNowLower;
+    const relevant = items.filter((row) => {
+      const t = String(row.title || "").toLowerCase();
+      const a = String(row.author || "").toLowerCase();
+      return t.includes(ql) || a.includes(ql);
+    });
+    if (relevant.length) mergeTitleRowsIntoCache(relevant);
+  }
+  let displayItems = filterTitleRowsByQuery(openLibraryTitleSuggestCache, qNow);
+  if (!displayItems.length && items.length && fetchStillApplies) {
+    displayItems = filterTitleRowsByQuery(items, qNow);
+    if (displayItems.length) mergeTitleRowsIntoCache(displayItems);
+  }
+  renderTitleSuggestionUl(els.bookTitleSuggestions, displayItems);
+}
+
+function scheduleBookTitleSuggestions() {
+  clearTimeout(bookTitleSuggestTimer);
+  if (!els.bookTitle) return;
+  const q = els.bookTitle.value.trim();
+  if (shouldResetOlSuggestCache(olSnapBookTitle, q)) openLibraryTitleSuggestCache = [];
+  olSnapBookTitle = q;
+  if (q.length < OPEN_LIB_SUGGEST_MIN_LEN) {
+    hideBookTitleSuggestionsPanel();
+    return;
+  }
+  const instant = filterTitleRowsByQuery(openLibraryTitleSuggestCache, q);
+  if (instant.length) renderTitleSuggestionUl(els.bookTitleSuggestions, instant);
+  bookTitleSuggestTimer = setTimeout(() => {
+    bookTitleSuggestTimer = null;
+    void runBookTitleSuggestionFetch();
+  }, OPEN_LIB_SUGGEST_DEBOUNCE_MS);
+}
+
+async function runBookAuthorSuggestionFetch() {
+  if (!els.bookAuthor || !els.bookAuthorSuggestions) return;
+  if (els.modalBookOverlay.classList.contains("hidden")) return;
+  const q = els.bookAuthor.value.trim();
+  if (q.length < OPEN_LIB_SUGGEST_MIN_LEN) {
+    hideBookAuthorSuggestionsPanel();
+    return;
+  }
+  if (bookAuthorSuggestAbort) bookAuthorSuggestAbort.abort();
+  const ac = new AbortController();
+  bookAuthorSuggestAbort = ac;
+  let names = [];
+  try {
+    names = await fetchOpenLibraryAuthorSuggestions(q, ac.signal);
+  } catch (e) {
+    if (e?.name === "AbortError") return;
+    names = [];
+  }
+  if (bookAuthorSuggestAbort !== ac) return;
+  bookAuthorSuggestAbort = null;
+  if (els.modalBookOverlay.classList.contains("hidden")) return;
+  const qNow = els.bookAuthor.value.trim();
+  if (qNow.length < OPEN_LIB_SUGGEST_MIN_LEN) {
+    hideBookAuthorSuggestionsPanel();
+    return;
+  }
+  const qLower = q.toLowerCase();
+  const qNowLower = qNow.toLowerCase();
+  const fetchStillApplies =
+    qNowLower === qLower ||
+    (qNowLower.startsWith(qLower) && qNowLower.length >= qLower.length);
+  if (names.length && fetchStillApplies) {
+    const ql = qNowLower;
+    const relevant = names.filter((n) => String(n || "").toLowerCase().includes(ql));
+    if (relevant.length) mergeAuthorNamesIntoCache(relevant);
+  }
+  let displayNames = filterAuthorNamesByQuery(openLibraryAuthorSuggestCache, qNow);
+  if (!displayNames.length && names.length && fetchStillApplies) {
+    displayNames = filterAuthorNamesByQuery(names, qNow);
+    if (displayNames.length) mergeAuthorNamesIntoCache(displayNames);
+  }
+  renderAuthorSuggestionUl(els.bookAuthorSuggestions, displayNames);
+}
+
+function scheduleBookAuthorSuggestions() {
+  clearTimeout(bookAuthorSuggestTimer);
+  if (!els.bookAuthor) return;
+  const q = els.bookAuthor.value.trim();
+  if (shouldResetOlSuggestCache(olSnapBookAuthor, q)) openLibraryAuthorSuggestCache = [];
+  olSnapBookAuthor = q;
+  if (q.length < OPEN_LIB_SUGGEST_MIN_LEN) {
+    hideBookAuthorSuggestionsPanel();
+    return;
+  }
+  const instant = filterAuthorNamesByQuery(openLibraryAuthorSuggestCache, q);
+  if (instant.length) renderAuthorSuggestionUl(els.bookAuthorSuggestions, instant);
+  bookAuthorSuggestTimer = setTimeout(() => {
+    bookAuthorSuggestTimer = null;
+    void runBookAuthorSuggestionFetch();
+  }, OPEN_LIB_SUGGEST_DEBOUNCE_MS);
+}
+
+function renderBookSeriesSuggestionsPanel() {
+  if (!els.bookSeriesName || !els.bookSeriesSuggestions) return;
+  if (els.modalBookOverlay.classList.contains("hidden")) {
+    hideBookSeriesSuggestionsPanel();
+    return;
+  }
+  if (!els.bookIsSeries.checked || els.seriesFields.classList.contains("hidden")) {
+    hideBookSeriesSuggestionsPanel();
+    return;
+  }
+  const q = els.bookSeriesName.value.trim();
+  const suggestions = getMatchingSeriesNames(state, q);
+  els.bookSeriesSuggestions.innerHTML = "";
+  if (!suggestions.length) {
+    els.bookSeriesSuggestions.classList.add("hidden");
+    return;
+  }
+  for (const name of suggestions) {
+    const li = document.createElement("li");
+    li.className = "tags-suggestion-item";
+    li.setAttribute("role", "presentation");
+    const pick = document.createElement("button");
+    pick.type = "button";
+    pick.className = "tags-suggestion-pick";
+    pick.setAttribute("role", "option");
+    pick.textContent = name;
+    pick.dataset.seriesName = name;
+    li.appendChild(pick);
+    els.bookSeriesSuggestions.appendChild(li);
+  }
+  els.bookSeriesSuggestions.classList.remove("hidden");
+}
+
+async function runWantTitleSuggestionFetch() {
+  if (!els.wantTitle || !els.wantTitleSuggestions) return;
+  if (els.modalWantOverlay.classList.contains("hidden")) return;
+  const q = els.wantTitle.value.trim();
+  if (q.length < OPEN_LIB_SUGGEST_MIN_LEN) {
+    hideWantTitleSuggestionsPanel();
+    return;
+  }
+  if (wantTitleSuggestAbort) wantTitleSuggestAbort.abort();
+  const ac = new AbortController();
+  wantTitleSuggestAbort = ac;
+  let items = [];
+  try {
+    items = await fetchOpenLibraryTitleSuggestions(q, ac.signal);
+  } catch (e) {
+    if (e?.name === "AbortError") return;
+    items = [];
+  }
+  if (wantTitleSuggestAbort !== ac) return;
+  wantTitleSuggestAbort = null;
+  if (els.modalWantOverlay.classList.contains("hidden")) return;
+  const qNow = els.wantTitle.value.trim();
+  if (qNow.length < OPEN_LIB_SUGGEST_MIN_LEN) {
+    hideWantTitleSuggestionsPanel();
+    return;
+  }
+  const qLower = q.toLowerCase();
+  const qNowLower = qNow.toLowerCase();
+  const fetchStillApplies =
+    qNowLower === qLower ||
+    (qNowLower.startsWith(qLower) && qNowLower.length >= qLower.length);
+  if (items.length && fetchStillApplies) {
+    const ql = qNowLower;
+    const relevant = items.filter((row) => {
+      const t = String(row.title || "").toLowerCase();
+      const a = String(row.author || "").toLowerCase();
+      return t.includes(ql) || a.includes(ql);
+    });
+    if (relevant.length) mergeTitleRowsIntoCache(relevant);
+  }
+  let displayItems = filterTitleRowsByQuery(openLibraryTitleSuggestCache, qNow);
+  if (!displayItems.length && items.length && fetchStillApplies) {
+    displayItems = filterTitleRowsByQuery(items, qNow);
+    if (displayItems.length) mergeTitleRowsIntoCache(displayItems);
+  }
+  renderTitleSuggestionUl(els.wantTitleSuggestions, displayItems);
+}
+
+function scheduleWantTitleSuggestions() {
+  clearTimeout(wantTitleSuggestTimer);
+  if (!els.wantTitle) return;
+  const q = els.wantTitle.value.trim();
+  if (shouldResetOlSuggestCache(olSnapWantTitle, q)) openLibraryTitleSuggestCache = [];
+  olSnapWantTitle = q;
+  if (q.length < OPEN_LIB_SUGGEST_MIN_LEN) {
+    hideWantTitleSuggestionsPanel();
+    return;
+  }
+  const instant = filterTitleRowsByQuery(openLibraryTitleSuggestCache, q);
+  if (instant.length) renderTitleSuggestionUl(els.wantTitleSuggestions, instant);
+  wantTitleSuggestTimer = setTimeout(() => {
+    wantTitleSuggestTimer = null;
+    void runWantTitleSuggestionFetch();
+  }, OPEN_LIB_SUGGEST_DEBOUNCE_MS);
+}
+
+async function runWantAuthorSuggestionFetch() {
+  if (!els.wantAuthor || !els.wantAuthorSuggestions) return;
+  if (els.modalWantOverlay.classList.contains("hidden")) return;
+  const q = els.wantAuthor.value.trim();
+  if (q.length < OPEN_LIB_SUGGEST_MIN_LEN) {
+    hideWantAuthorSuggestionsPanel();
+    return;
+  }
+  if (wantAuthorSuggestAbort) wantAuthorSuggestAbort.abort();
+  const ac = new AbortController();
+  wantAuthorSuggestAbort = ac;
+  let names = [];
+  try {
+    names = await fetchOpenLibraryAuthorSuggestions(q, ac.signal);
+  } catch (e) {
+    if (e?.name === "AbortError") return;
+    names = [];
+  }
+  if (wantAuthorSuggestAbort !== ac) return;
+  wantAuthorSuggestAbort = null;
+  if (els.modalWantOverlay.classList.contains("hidden")) return;
+  const qNow = els.wantAuthor.value.trim();
+  if (qNow.length < OPEN_LIB_SUGGEST_MIN_LEN) {
+    hideWantAuthorSuggestionsPanel();
+    return;
+  }
+  const qLower = q.toLowerCase();
+  const qNowLower = qNow.toLowerCase();
+  const fetchStillApplies =
+    qNowLower === qLower ||
+    (qNowLower.startsWith(qLower) && qNowLower.length >= qLower.length);
+  if (names.length && fetchStillApplies) {
+    const ql = qNowLower;
+    const relevant = names.filter((n) => String(n || "").toLowerCase().includes(ql));
+    if (relevant.length) mergeAuthorNamesIntoCache(relevant);
+  }
+  let displayNames = filterAuthorNamesByQuery(openLibraryAuthorSuggestCache, qNow);
+  if (!displayNames.length && names.length && fetchStillApplies) {
+    displayNames = filterAuthorNamesByQuery(names, qNow);
+    if (displayNames.length) mergeAuthorNamesIntoCache(displayNames);
+  }
+  renderAuthorSuggestionUl(els.wantAuthorSuggestions, displayNames);
+}
+
+function scheduleWantAuthorSuggestions() {
+  clearTimeout(wantAuthorSuggestTimer);
+  if (!els.wantAuthor) return;
+  const q = els.wantAuthor.value.trim();
+  if (shouldResetOlSuggestCache(olSnapWantAuthor, q)) openLibraryAuthorSuggestCache = [];
+  olSnapWantAuthor = q;
+  if (q.length < OPEN_LIB_SUGGEST_MIN_LEN) {
+    hideWantAuthorSuggestionsPanel();
+    return;
+  }
+  const instant = filterAuthorNamesByQuery(openLibraryAuthorSuggestCache, q);
+  if (instant.length) renderAuthorSuggestionUl(els.wantAuthorSuggestions, instant);
+  wantAuthorSuggestTimer = setTimeout(() => {
+    wantAuthorSuggestTimer = null;
+    void runWantAuthorSuggestionFetch();
+  }, OPEN_LIB_SUGGEST_DEBOUNCE_MS);
 }
 
 function getKnownSeriesTotalByName(name) {
@@ -2828,7 +3598,7 @@ function getLibraryMinimalViewTitle() {
     if (def && activeUserShelfId === def) return "Owned";
     return userShelfName(state, activeUserShelfId);
   }
-  return "Your library";
+  return "Library";
 }
 
 function updateLibraryChrome() {
@@ -2842,18 +3612,19 @@ function updateLibraryChrome() {
   els.libraryMinimalHead.classList.toggle("hidden", full);
   els.libraryMinimalHead.setAttribute("aria-hidden", full ? "true" : "false");
   if (els.libraryMinimalTitle) els.libraryMinimalTitle.textContent = getLibraryMinimalViewTitle();
-  const hideStatusColors = showWantListInLibrary;
-  els.btnStatusColorsFull?.classList.toggle("hidden", !full || hideStatusColors);
-  els.btnStatusColorsMinimal?.classList.toggle("hidden", full || hideStatusColors);
-  if (!full || hideStatusColors) closeStatusColorsPopover();
+}
+
+function updateStatusColorsHeaderVisibility() {
+  const show = activeMainView === "library" && !showWantListInLibrary;
+  els.btnStatusColorsHeader?.classList.toggle("hidden", !show);
+  if (!show) closeStatusColorsPopover();
 }
 
 function closeStatusColorsPopover() {
   if (!els.statusColorsPopover) return;
   els.statusColorsPopover.classList.add("hidden");
   els.statusColorsPopover.setAttribute("aria-hidden", "true");
-  els.btnStatusColorsFull?.setAttribute("aria-expanded", "false");
-  els.btnStatusColorsMinimal?.setAttribute("aria-expanded", "false");
+  els.btnStatusColorsHeader?.setAttribute("aria-expanded", "false");
   statusColorsPopoverOpen = false;
   statusColorsAnchor = null;
 }
@@ -2889,8 +3660,6 @@ function toggleStatusColorsPopover(anchor) {
   els.statusColorsPopover.classList.remove("hidden");
   els.statusColorsPopover.setAttribute("aria-hidden", "false");
   nextAnchor.setAttribute("aria-expanded", "true");
-  if (nextAnchor === els.btnStatusColorsFull) els.btnStatusColorsMinimal?.setAttribute("aria-expanded", "false");
-  if (nextAnchor === els.btnStatusColorsMinimal) els.btnStatusColorsFull?.setAttribute("aria-expanded", "false");
   requestAnimationFrame(() => {
     positionStatusColorsPopover(nextAnchor);
     requestAnimationFrame(() => positionStatusColorsPopover(nextAnchor));
@@ -3052,14 +3821,6 @@ function renderCozySidebar() {
     count: seriesCount,
     active: isSidebarMainViewActive("series"),
     onClick: () => setMainView("series"),
-  });
-
-  appendCozySidebarButton(els.sidebarShelves, {
-    iconKey: "goals",
-    label: "Reading goals",
-    count: state.goals?.length || 0,
-    active: isSidebarMainViewActive("goals"),
-    onClick: () => setMainView("goals"),
   });
 
   if (els.btnAddUserShelf) {
@@ -3557,110 +4318,124 @@ function renderGoals() {
   }
 }
 
-function renderGoalsMainSummary() {
-  if (!els.goalsMainSummaryGrid) return;
+function getGoalsSortedForDashboardSummary() {
   const goals = [...(state.goals || [])];
   goals.sort((a, b) => {
     const rank = { year: 0, month: 1, week: 2 };
     return (rank[a.period] ?? 99) - (rank[b.period] ?? 99);
   });
+  return goals;
+}
+
+function appendGoalSummaryCardTo(container, g) {
+  const done = countReadBooksInPeriod(state.books, g.period, g.excludeAudiobooks);
+  const target = Math.max(0, parseInt(g.target, 10) || 0);
+  const pct = target > 0 ? Math.min(100, Math.round((done / target) * 100)) : 0;
+  const periodKey = g.currentPeriodKey || getCurrentPeriodKey(g.period, new Date());
+  const pace = goalPaceState(done, target, g.period, periodKey, new Date());
+  const chart = finishCountsForGoalChart(state.books, g.period, periodKey, g.excludeAudiobooks);
+  const maxCount = Math.max(...chart.counts, 0);
+
+  const card = document.createElement("article");
+  card.className = "goals-main-card";
+
+  const head = document.createElement("header");
+  head.className = "goals-main-card-head";
+
+  const label = document.createElement("p");
+  label.className = "goals-main-card-label";
+  label.textContent = goalPeriodHeading(g.period);
+
+  head.appendChild(label);
+  if (pace.label) {
+    const paceEl = document.createElement("span");
+    paceEl.className = `goals-main-pace goals-main-pace--${pace.tone}`;
+    paceEl.textContent = pace.label;
+    head.appendChild(paceEl);
+  }
+
+  const body = document.createElement("div");
+  body.className = "goals-main-card-body";
+
+  const ring = document.createElement("div");
+  ring.className = "goals-main-ring goals-main-ring--large";
+  ring.style.setProperty("--p", `${pct}%`);
+  ring.setAttribute(
+    "aria-label",
+    `${goalPeriodHeading(g.period)} goal progress: ${done} of ${target} books, ${pct} percent`
+  );
+  ring.setAttribute("role", "img");
+
+  const ringInner = document.createElement("span");
+  ringInner.className = "goals-main-ring-inner";
+  const ringMain = document.createElement("strong");
+  ringMain.className = "goals-main-ring-main";
+  ringMain.textContent = `${done} of ${target}`;
+  const ringSub = document.createElement("span");
+  ringSub.className = "goals-main-ring-sub";
+  ringSub.textContent = `${pct}%`;
+  ringInner.appendChild(ringMain);
+  ringInner.appendChild(ringSub);
+  ring.appendChild(ringInner);
+
+  const activity = document.createElement("div");
+  activity.className = "goals-main-activity";
+  const activityLabel = document.createElement("p");
+  activityLabel.className = "goals-main-activity-label";
+  activityLabel.textContent = chart.label;
+  const bars = document.createElement("div");
+  bars.className = "goals-main-activity-bars";
+  bars.setAttribute("role", "img");
+  bars.setAttribute("aria-label", `${chart.label}: ${chart.counts.join(", ")} books finished`);
+  chart.counts.forEach((count) => {
+    const bar = document.createElement("button");
+    bar.type = "button";
+    bar.className = "goals-main-activity-bar";
+    const pctHeight = maxCount > 0 ? (count / maxCount) * 100 : 0;
+    bar.style.setProperty("--h", `${Math.max(14, Math.round(pctHeight))}%`);
+    const barLabel = `${count} book${count === 1 ? "" : "s"} read`;
+    bar.setAttribute("aria-label", barLabel);
+    bar.dataset.countLabel = barLabel;
+    bar.title = barLabel;
+    bars.appendChild(bar);
+  });
+  activity.appendChild(activityLabel);
+  activity.appendChild(bars);
+  const seriesStats = computeSeriesSummaryCounts();
+  const stats = document.createElement("p");
+  stats.className = "goals-main-series-stats";
+  stats.textContent = `${seriesStats.finished} series finished · ${seriesStats.inProgress} in progress`;
+  activity.appendChild(stats);
+
+  body.appendChild(ring);
+  body.appendChild(activity);
+  card.appendChild(head);
+  card.appendChild(body);
+  container.appendChild(card);
+}
+
+function renderGoalsMainSummary() {
+  if (!els.goalsMainSummaryGrid) return;
+  const goals = getGoalsSortedForDashboardSummary();
 
   els.goalsMainSummaryGrid.innerHTML = "";
   if (!goals.length) {
+    goalsMainSummaryPage = 0;
     const empty = document.createElement("p");
     empty.className = "goals-main-summary-empty";
     empty.textContent = "No goals set yet.";
     els.goalsMainSummaryGrid.appendChild(empty);
+    els.goalsMainSummaryNav?.classList.add("hidden");
     return;
   }
 
-  const goalsToRender = goals.length ? [goals[0]] : [];
-  for (const g of goalsToRender) {
-    const done = countReadBooksInPeriod(state.books, g.period, g.excludeAudiobooks);
-    const target = Math.max(0, parseInt(g.target, 10) || 0);
-    const pct = target > 0 ? Math.min(100, Math.round((done / target) * 100)) : 0;
-    const periodKey = g.currentPeriodKey || getCurrentPeriodKey(g.period, new Date());
-    const pace = goalPaceState(done, target, g.period, periodKey, new Date());
-    const chart = finishCountsForGoalChart(state.books, g.period, periodKey, g.excludeAudiobooks);
-    const maxCount = Math.max(...chart.counts, 0);
+  if (goalsMainSummaryPage >= goals.length) goalsMainSummaryPage = 0;
+  const showNav = goals.length > 1;
+  els.goalsMainSummaryNav?.classList.toggle("hidden", !showNav);
+  if (els.goalsMainSummaryPrev) els.goalsMainSummaryPrev.disabled = !showNav;
+  if (els.goalsMainSummaryNext) els.goalsMainSummaryNext.disabled = !showNav;
 
-    const card = document.createElement("article");
-    card.className = "goals-main-card";
-
-    const head = document.createElement("header");
-    head.className = "goals-main-card-head";
-
-    const label = document.createElement("p");
-    label.className = "goals-main-card-label";
-    label.textContent = goalPeriodHeading(g.period);
-
-    head.appendChild(label);
-    if (pace.label) {
-      const paceEl = document.createElement("span");
-      paceEl.className = `goals-main-pace goals-main-pace--${pace.tone}`;
-      paceEl.textContent = pace.label;
-      head.appendChild(paceEl);
-    }
-
-    const body = document.createElement("div");
-    body.className = "goals-main-card-body";
-
-    const ring = document.createElement("div");
-    ring.className = "goals-main-ring goals-main-ring--large";
-    ring.style.setProperty("--p", `${pct}%`);
-    ring.setAttribute(
-      "aria-label",
-      `${goalPeriodHeading(g.period)} goal progress: ${done} of ${target} books, ${pct} percent`
-    );
-    ring.setAttribute("role", "img");
-
-    const ringInner = document.createElement("span");
-    ringInner.className = "goals-main-ring-inner";
-    const ringMain = document.createElement("strong");
-    ringMain.className = "goals-main-ring-main";
-    ringMain.textContent = `${done} of ${target}`;
-    const ringSub = document.createElement("span");
-    ringSub.className = "goals-main-ring-sub";
-    ringSub.textContent = `${pct}%`;
-    ringInner.appendChild(ringMain);
-    ringInner.appendChild(ringSub);
-    ring.appendChild(ringInner);
-
-    const activity = document.createElement("div");
-    activity.className = "goals-main-activity";
-    const activityLabel = document.createElement("p");
-    activityLabel.className = "goals-main-activity-label";
-    activityLabel.textContent = chart.label;
-    const bars = document.createElement("div");
-    bars.className = "goals-main-activity-bars";
-    bars.setAttribute("role", "img");
-    bars.setAttribute("aria-label", `${chart.label}: ${chart.counts.join(", ")} books finished`);
-    chart.counts.forEach((count) => {
-      const bar = document.createElement("button");
-      bar.type = "button";
-      bar.className = "goals-main-activity-bar";
-      const pctHeight = maxCount > 0 ? (count / maxCount) * 100 : 0;
-      bar.style.setProperty("--h", `${Math.max(14, Math.round(pctHeight))}%`);
-      const label = `${count} book${count === 1 ? "" : "s"} read`;
-      bar.setAttribute("aria-label", label);
-      bar.dataset.countLabel = label;
-      bar.title = label;
-      bars.appendChild(bar);
-    });
-    activity.appendChild(activityLabel);
-    activity.appendChild(bars);
-    const seriesStats = computeSeriesSummaryCounts();
-    const stats = document.createElement("p");
-    stats.className = "goals-main-series-stats";
-    stats.textContent = `${seriesStats.finished} series finished · ${seriesStats.inProgress} in progress`;
-    activity.appendChild(stats);
-
-    body.appendChild(ring);
-    body.appendChild(activity);
-    card.appendChild(head);
-    card.appendChild(body);
-    els.goalsMainSummaryGrid.appendChild(card);
-  }
+  appendGoalSummaryCardTo(els.goalsMainSummaryGrid, goals[goalsMainSummaryPage]);
 }
 
 function getSelectedGoalPeriod() {
@@ -4182,12 +4957,12 @@ function renderAll() {
   updateMainViewPanes();
   updateShelfActiveHeading();
   renderBookList();
-  renderSeriesNameSuggestions();
   renderGoals();
   renderGoalsMainSummary();
   renderGoalsHistory();
   renderSeries();
   renderExportReminder();
+  updateStatusColorsHeaderVisibility();
   if (activeDetailsBookId && els.bookDetailsOverlay && !els.bookDetailsOverlay.classList.contains("hidden")) {
     const current = state.books.find((x) => x.id === activeDetailsBookId);
     if (current) renderBookDetailsPanel(current);
@@ -4456,6 +5231,8 @@ function openBookModal(bookId, opts = {}) {
   if (els.bookDetailsOverlay && !els.bookDetailsOverlay.classList.contains("hidden")) {
     closeBookDetailsPanel();
   }
+  hideBookFieldAutocompletePanels();
+  clearOpenLibrarySuggestCaches();
   const isEdit = !!bookId;
   const b = isEdit ? state.books.find((x) => x.id === bookId) : null;
   modalCoverCandidates = [];
@@ -4589,6 +5366,9 @@ function openBookModal(bookId, opts = {}) {
   }
   maybeAutofillSeriesTotal();
 
+  olSnapBookTitle = els.bookTitle.value.trim();
+  olSnapBookAuthor = els.bookAuthor.value.trim();
+
   els.modalBookOverlay.classList.remove("hidden");
   els.modalBookOverlay.setAttribute("aria-hidden", "false");
   els.bookTitle.focus();
@@ -4598,6 +5378,7 @@ function closeBookModal() {
   pendingWantListAdoptId = null;
   modalCoverCandidates = [];
   setModalCoverChoice("auto", "", null);
+  hideBookFieldAutocompletePanels();
   clearTimeout(tagSuggestBlurTimer);
   hideTagSuggestionsPanel();
   els.modalBookOverlay.classList.add("hidden");
@@ -4778,6 +5559,8 @@ function deleteBook() {
 }
 
 function openWantModal(itemId) {
+  hideWantTitleAuthorAutocompletePanels();
+  clearOpenLibrarySuggestCaches();
   const existing = itemId ? state.wantList.find((x) => x.id === itemId) : null;
   const mt = document.getElementById("modal-want-title");
   if (mt) mt.textContent = existing ? "Edit want list item" : "Add to want list";
@@ -4788,12 +5571,15 @@ function openWantModal(itemId) {
   els.wantNotes.value = existing?.notes || "";
   els.wantTags.value = (existing?.tags || []).join(", ");
   els.wantRecommended.value = existing?.recommendedBy || "";
+  olSnapWantTitle = els.wantTitle.value.trim();
+  olSnapWantAuthor = els.wantAuthor.value.trim();
   els.modalWantOverlay.classList.remove("hidden");
   els.modalWantOverlay.setAttribute("aria-hidden", "false");
   els.wantTitle.focus();
 }
 
 function closeWantModal() {
+  hideWantTitleAuthorAutocompletePanels();
   clearTimeout(wantTagSuggestBlurTimer);
   hideWantTagSuggestionsPanel();
   els.modalWantOverlay.classList.add("hidden");
@@ -4848,13 +5634,9 @@ els.newShelfName?.addEventListener("keydown", (e) => {
   }
 });
 
-els.btnStatusColorsFull?.addEventListener("click", (e) => {
+els.btnStatusColorsHeader?.addEventListener("click", (e) => {
   e.stopPropagation();
-  toggleStatusColorsPopover(els.btnStatusColorsFull);
-});
-els.btnStatusColorsMinimal?.addEventListener("click", (e) => {
-  e.stopPropagation();
-  toggleStatusColorsPopover(els.btnStatusColorsMinimal);
+  toggleStatusColorsPopover(els.btnStatusColorsHeader);
 });
 
 window.addEventListener("resize", () => {
@@ -4963,6 +5745,18 @@ els.currentlyReadingNext?.addEventListener("click", () => {
   currentlyReadingPage = (currentlyReadingPage + 1) % pageCount;
   renderCurrentlyReading(list);
 });
+els.goalsMainSummaryPrev?.addEventListener("click", () => {
+  const goals = getGoalsSortedForDashboardSummary();
+  if (goals.length <= 1) return;
+  goalsMainSummaryPage = (goalsMainSummaryPage - 1 + goals.length) % goals.length;
+  renderGoalsMainSummary();
+});
+els.goalsMainSummaryNext?.addEventListener("click", () => {
+  const goals = getGoalsSortedForDashboardSummary();
+  if (goals.length <= 1) return;
+  goalsMainSummaryPage = (goalsMainSummaryPage + 1) % goals.length;
+  renderGoalsMainSummary();
+});
 els.bookDateUnknown.addEventListener("change", () => updateBookDateUnknownUI());
 els.rateDateUnknown.addEventListener("change", () => updateRateDateUnknownUI());
 
@@ -5018,6 +5812,59 @@ if (els.wantTagsSuggestions) {
   });
 }
 
+function bindAutocompleteSuggestionClicks(ul, onPick) {
+  if (!ul) return;
+  ul.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+  });
+  ul.addEventListener("click", (e) => {
+    const pick = e.target.closest(".tags-suggestion-pick");
+    if (pick) onPick(pick);
+  });
+}
+
+bindAutocompleteSuggestionClicks(els.bookTitleSuggestions, (pick) => {
+  if (pick.dataset.title === undefined) return;
+  els.bookTitle.value = pick.dataset.title;
+  const auth = (pick.dataset.author || "").trim();
+  const cur = (els.bookAuthor.value || "").trim();
+  if (auth && cur.length < 3) els.bookAuthor.value = auth;
+  hideBookTitleSuggestionsPanel();
+  els.bookTitle.focus();
+});
+
+bindAutocompleteSuggestionClicks(els.bookAuthorSuggestions, (pick) => {
+  if (!pick.dataset.authorName) return;
+  els.bookAuthor.value = pick.dataset.authorName;
+  hideBookAuthorSuggestionsPanel();
+  els.bookAuthor.focus();
+});
+
+bindAutocompleteSuggestionClicks(els.bookSeriesSuggestions, (pick) => {
+  if (!pick.dataset.seriesName) return;
+  els.bookSeriesName.value = pick.dataset.seriesName;
+  hideBookSeriesSuggestionsPanel();
+  maybeAutofillSeriesTotal();
+  els.bookSeriesName.focus();
+});
+
+bindAutocompleteSuggestionClicks(els.wantTitleSuggestions, (pick) => {
+  if (pick.dataset.title === undefined) return;
+  els.wantTitle.value = pick.dataset.title;
+  const auth = (pick.dataset.author || "").trim();
+  const cur = (els.wantAuthor.value || "").trim();
+  if (auth && cur.length < 3) els.wantAuthor.value = auth;
+  hideWantTitleSuggestionsPanel();
+  els.wantTitle.focus();
+});
+
+bindAutocompleteSuggestionClicks(els.wantAuthorSuggestions, (pick) => {
+  if (!pick.dataset.authorName) return;
+  els.wantAuthor.value = pick.dataset.authorName;
+  hideWantAuthorSuggestionsPanel();
+  els.wantAuthor.focus();
+});
+
 els.bookTags.addEventListener("input", () => renderTagSuggestionsPanel());
 els.bookTags.addEventListener("focus", () => {
   clearTimeout(tagSuggestBlurTimer);
@@ -5035,12 +5882,57 @@ els.wantTags.addEventListener("blur", () => {
   wantTagSuggestBlurTimer = setTimeout(() => hideWantTagSuggestionsPanel(), 180);
 });
 
+els.bookTitle.addEventListener("input", () => scheduleBookTitleSuggestions());
+els.bookTitle.addEventListener("focus", () => {
+  clearTimeout(bookTitleSuggestBlurTimer);
+  scheduleBookTitleSuggestions();
+});
+els.bookTitle.addEventListener("blur", () => {
+  bookTitleSuggestBlurTimer = setTimeout(() => hideBookTitleSuggestionsPanel(), 180);
+});
+
+els.bookAuthor.addEventListener("input", () => scheduleBookAuthorSuggestions());
+els.bookAuthor.addEventListener("focus", () => {
+  clearTimeout(bookAuthorSuggestBlurTimer);
+  scheduleBookAuthorSuggestions();
+});
+els.bookAuthor.addEventListener("blur", () => {
+  bookAuthorSuggestBlurTimer = setTimeout(() => hideBookAuthorSuggestionsPanel(), 180);
+});
+
+els.wantTitle.addEventListener("input", () => scheduleWantTitleSuggestions());
+els.wantTitle.addEventListener("focus", () => {
+  clearTimeout(wantTitleSuggestBlurTimer);
+  scheduleWantTitleSuggestions();
+});
+els.wantTitle.addEventListener("blur", () => {
+  wantTitleSuggestBlurTimer = setTimeout(() => hideWantTitleSuggestionsPanel(), 180);
+});
+
+els.wantAuthor.addEventListener("input", () => scheduleWantAuthorSuggestions());
+els.wantAuthor.addEventListener("focus", () => {
+  clearTimeout(wantAuthorSuggestBlurTimer);
+  scheduleWantAuthorSuggestions();
+});
+els.wantAuthor.addEventListener("blur", () => {
+  wantAuthorSuggestBlurTimer = setTimeout(() => hideWantAuthorSuggestionsPanel(), 180);
+});
+
 els.bookIsSeries.addEventListener("change", () => {
   els.seriesFields.classList.toggle("hidden", !els.bookIsSeries.checked);
+  if (!els.bookIsSeries.checked) hideBookSeriesSuggestionsPanel();
   maybeAutofillSeriesTotal();
 });
 els.bookSeriesName.addEventListener("input", () => {
   maybeAutofillSeriesTotal();
+  renderBookSeriesSuggestionsPanel();
+});
+els.bookSeriesName.addEventListener("focus", () => {
+  clearTimeout(bookSeriesSuggestBlurTimer);
+  renderBookSeriesSuggestionsPanel();
+});
+els.bookSeriesName.addEventListener("blur", () => {
+  bookSeriesSuggestBlurTimer = setTimeout(() => hideBookSeriesSuggestionsPanel(), 180);
 });
 els.bookSeriesName.addEventListener("change", () => {
   maybeAutofillSeriesTotal();
@@ -5200,6 +6092,7 @@ els.btnSignIn?.addEventListener("click", async () => {
 els.btnSignOut?.addEventListener("click", async () => {
   if (!ensureSupabaseClientForAuth()) return;
   setAuthStatus("Signing out…", false);
+  persist();
   await sbClient.auth.signOut();
 });
 
@@ -5233,9 +6126,8 @@ document.addEventListener("click", (e) => {
   const target = e.target;
   if (statusColorsPopoverOpen && els.statusColorsPopover) {
     const inPop = els.statusColorsPopover.contains(target);
-    const onFull = els.btnStatusColorsFull?.contains(target);
-    const onMin = els.btnStatusColorsMinimal?.contains(target);
-    if (!inPop && !onFull && !onMin) closeStatusColorsPopover();
+    const onHeaderBtn = els.btnStatusColorsHeader?.contains(target);
+    if (!inPop && !onHeaderBtn) closeStatusColorsPopover();
   }
   if (els.settingsMenu && els.btnSettingsToggle) {
     if (!els.settingsMenu.contains(target) && !els.btnSettingsToggle.contains(target)) {
